@@ -10,6 +10,7 @@ import { PackagerConfig } from './config.js';
 import { PackagingJob, JobPoller } from './job-poller.js';
 import { IntuneUploader, IntuneAppResult, DuplicateAppError } from './intune-uploader.js';
 import { createLogger, Logger } from './logger.js';
+import { defaultSilentArgs } from './silent-args.js';
 
 interface PackagingResult {
   intunewinPath: string;
@@ -897,23 +898,16 @@ ${steps}
    * Extract silent switches from install command
    */
   private extractSilentSwitches(installCommand: string, installerType: string): string {
-    const defaultSwitches: Record<string, string> = {
-      msi: '/qn /norestart',
-      exe: '/S',
-      inno: '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART',
-      nullsoft: '/S',
-      wix: '/qn /norestart',
-      burn: '/q /norestart',
-      msix: '',
-    };
-
     // Try to extract switches from the install command
     const switchMatch = installCommand.match(/(?:\/\S+|-\S+)(?:\s+(?:\/\S+|-\S+))*/);
     if (switchMatch && switchMatch[0] !== '-DeploymentType') {
       return switchMatch[0];
     }
 
-    return defaultSwitches[installerType] || '/S';
+    // Fall back to the per-type default (shared with the IntuneWin32App path). A bare
+    // `exe` has no reliable default (defaultSilentArgs returns null) — keep the legacy
+    // `/S` guess here so PSADT behavior is unchanged.
+    return defaultSilentArgs(installerType) ?? '/S';
   }
 
   /**
