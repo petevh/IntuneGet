@@ -4,7 +4,8 @@
 
 .DESCRIPTION
     This script downloads IntuneWinAppUtil.exe and PSAppDeployToolkit
-    to the specified tools directory.
+    to the specified tools directory, and ensures the IntuneWin32App
+    PowerShell module is installed (used by the IntuneWin32App packaging path).
 
 .PARAMETER ToolsDir
     The directory where tools should be downloaded
@@ -71,6 +72,47 @@ if (-not (Test-Path $psadtDir)) {
 }
 else {
     Write-Host "PSAppDeployToolkit already exists"
+}
+
+# Ensure the IntuneWin32App module (build tool for the IntuneWin32App packaging path).
+# Runs fine on Windows PowerShell 5.1 (module min version is 5.0; v1.5.0 has no external
+# deps), so no PowerShell 7 is required on the packager host.
+$moduleName = "IntuneWin32App"
+if (-not (Get-Module -ListAvailable -Name $moduleName)) {
+    Write-Host "Installing $moduleName module..."
+    try {
+        # PSGallery over TLS 1.2 — Windows PowerShell 5.1 may default to TLS 1.0 and fail.
+        [Net.ServicePointManager]::SecurityProtocol = `
+            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+        # First-run bootstrap: the NuGet provider must exist or Install-Module prompts
+        # (fatal when unattended).
+        if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+        }
+        # Trust PSGallery so the install doesn't prompt.
+        if ((Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy -ne "Trusted") {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+        }
+
+        # AllUsers needs elevation; fall back to CurrentUser if not elevated so a
+        # non-admin setup still succeeds (module is then visible only to that account —
+        # which must be the one the packager runs as).
+        $isAdmin = ([Security.Principal.WindowsPrincipal] `
+            [Security.Principal.WindowsIdentity]::GetCurrent()
+        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        $scope = if ($isAdmin) { "AllUsers" } else { "CurrentUser" }
+
+        Install-Module -Name $moduleName -Scope $scope -Force -AllowClobber
+        Write-Host "Installed $moduleName successfully (scope: $scope)"
+    }
+    catch {
+        Write-Error "Failed to install ${moduleName}: $_"
+        exit 1
+    }
+}
+else {
+    Write-Host "$moduleName module already available"
 }
 
 Write-Host ""
