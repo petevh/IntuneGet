@@ -181,14 +181,22 @@ export class JobProcessor {
 
     // Check if tools exist
     const intuneWinExists = fs.existsSync(intuneWinUtil);
+    // The download script also installs the IntuneWin32App module (build tool for the
+    // IntuneWin32App path). That module can be missing even when the file-based tools are
+    // present, so probe it independently — otherwise the script never runs and the module
+    // never installs on a box that already has IntuneWinAppUtil + PSADT.
+    const intuneWin32AppModuleAvailable = await this.isIntuneWin32AppModuleAvailable();
 
-    if (!intuneWinExists || !fs.existsSync(psadtDir)) {
+    if (!intuneWinExists || !fs.existsSync(psadtDir) || !intuneWin32AppModuleAvailable) {
       this.logger.info('Downloading required tools...');
 
       // Run the download script
       const scriptPath = path.join(__dirname, '..', 'scripts', 'download-tools.ps1');
 
-      // Check if script exists, if not use inline commands
+      // Check if script exists, if not use inline commands. NOTE: the inline fallback does
+      // NOT install the IntuneWin32App module — it only exists for when the packaged script
+      // is absent, which shouldn't happen in a normal install (scripts/ is in the npm files
+      // list). If you hit this path and need the module, run "Install-Module IntuneWin32App".
       if (!fs.existsSync(scriptPath)) {
         await this.downloadToolsInline(toolsDir);
       } else {
@@ -208,6 +216,20 @@ export class JobProcessor {
     }
 
     this.logger.debug('Tools verified', { toolsDir });
+  }
+
+  /** True if the IntuneWin32App PowerShell module is installed for the current user. */
+  private async isIntuneWin32AppModuleAvailable(): Promise<boolean> {
+    try {
+      const out = await this.runPowerShell(
+        "if (Get-Module -ListAvailable -Name IntuneWin32App) { 'yes' } else { 'no' }"
+      );
+      return out.trim().endsWith('yes');
+    } catch {
+      // If the probe itself fails, don't block startup — let the download script try, and
+      // the packaging step will surface a clear error if the module is genuinely absent.
+      return false;
+    }
   }
 
   /**
