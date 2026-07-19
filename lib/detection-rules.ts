@@ -18,23 +18,35 @@ import { resolveInstallerFileName } from '@/lib/installer-filename';
 import { normalizeMarkerPath } from '@/lib/registry-marker';
 
 /**
- * Generate detection rules based on installer metadata
+ * Generate detection rules based on installer metadata.
  *
- * Strategy (in order of preference):
- * 1. Registry marker (IntuneGet) - when wingetId and version are provided. The
- *    PSADT install script writes this marker for EVERY installer type
- *    (including MSI), so it is the most reliable option across the board.
- *    MSI product codes from winget manifests are NOT used as the primary rule
- *    because many MSI apps change their product code every release, leaving
- *    the deployed detection rule stale (e.g. Chrome, PDF-XChange).
- * 2. MSI Product Code - fallback for MSI/WiX when wingetId/version are absent
- * 3. Folder existence - simple last resort (RoboPack approach)
- * 4. Script detection - for MSIX/APPX via Package Family Name
+ * NATIVE-FIRST strategy (changed 2026-07-19 — see docker-homelab intuneget/DESIGN.md §2).
+ * The previous strategy preferred the IntuneGet registry marker
+ * (`HKLM\SOFTWARE\IntuneGet\Apps\{id}`) for every installer type. That marker is written
+ * only by the PSADT install script, so (a) it breaks entirely once packaging moves off
+ * PSADT, and (b) — more importantly — it only detects apps IntuneGet installed. An app put
+ * on the machine by IT, by the user, or by an older package has no marker, so Intune
+ * reports "not installed" and re-pushes it. Native detection sees the app itself, however
+ * it got there. So the order is now:
+ *
+ * 1. MSIX/APPX  → PackageFamilyName script (the only correct MSIX detection).
+ * 2. Uninstall-registry key existence — from the manifest ProductCode (GUID for MSI/WiX,
+ *    ARP DisplayName for exe/inno/nullsoft). Install-source-agnostic. EXISTENCE-based
+ *    (no version comparison — NormalizedInstaller lacks DisplayVersion).
+ * 3. Folder existence — when there is no ProductCode to key on.
+ * 4. IntuneGet PSADT marker — LAST RESORT, only for the Tier-5 tail (zip/portable and
+ *    markerless exe that must still be packaged by PSADT). Requires wingetId+version.
+ *
+ * NOTE the staleness caveat that motivated the old marker-first choice: a raw MSI
+ * ProductCode as an Intune *MSI* rule goes stale when vendors rotate the code each release.
+ * We avoid that by detecting the uninstall-KEY existence, not by matching the ProductCode
+ * value in an MSI rule — the uninstall key is more stable than an exact-GUID MSI match, and
+ * existence detection is version-agnostic by construction.
  *
  * @param installer - Normalized installer metadata
  * @param displayName - Application display name
- * @param wingetId - Optional Winget package ID for registry marker detection
- * @param version - Optional version for version comparison detection
+ * @param wingetId - Optional Winget package ID (for the marker fallback only)
+ * @param version - Optional version (for the marker fallback only)
  * @param markerPath - Optional custom registry marker root (psadtConfig.registryMarkerPath)
  */
 export function generateDetectionRules(
@@ -44,48 +56,30 @@ export function generateDetectionRules(
   version?: string,
   markerPath?: string
 ): DetectionRule[] {
-  switch (installer.type) {
-    case 'msi':
-    case 'wix':
-      // MSI: Prefer registry marker (product codes go stale across versions),
-      // then product code, then folder detection
-      return generateMsiDetectionRules(installer, displayName, wingetId, version, markerPath);
-
-    case 'burn':
-      // Burn bundles: Use registry marker if wingetId provided, otherwise folder detection
-      if (wingetId && version) {
-        return generateRegistryMarkerDetectionRules(wingetId, version, installer.scope, markerPath);
-      }
-      return generateFolderDetectionRules(installer, displayName);
-
-    case 'msix':
-    case 'appx':
-      // MSIX: Must use script detection with Package Family Name
-      return generateMsixDetectionRules(installer, displayName);
-
-    case 'exe':
-    case 'inno':
-    case 'nullsoft':
-      // Use PSADT registry marker - more reliable than uninstall registry search
-      if (wingetId && version) {
-        return generateRegistryMarkerDetectionRules(wingetId, version, installer.scope, markerPath);
-      }
-      return generateFolderDetectionRules(installer, displayName);
-
-    case 'portable':
-    case 'zip':
-      // Portable: Use registry marker if wingetId provided, otherwise folder existence
-      if (wingetId && version) {
-        return generateRegistryMarkerDetectionRules(wingetId, version, installer.scope, markerPath);
-      }
-      return generateFolderDetectionRules(installer, displayName);
-
-    default:
-      if (wingetId && version) {
-        return generateRegistryMarkerDetectionRules(wingetId, version, installer.scope, markerPath);
-      }
-      return generateFolderDetectionRules(installer, displayName);
+  // MSIX/APPX: only PFN script detection is correct.
+  if (installer.type === 'msix' || installer.type === 'appx') {
+    return generateMsixDetectionRules(installer, displayName);
   }
+
+  // Native, install-source-agnostic: uninstall-registry key existence (MSI GUID or ARP
+  // DisplayName from the manifest ProductCode). Covers msi/wix/exe/inno/nullsoft/burn and
+  // anything else that carries a ProductCode.
+  const uninstallRule = generateUninstallRegistryDetectionRules(installer);
+  if (uninstallRule) {
+    return uninstallRule;
+  }
+
+  // No ProductCode (e.g. many zip/portable, and some exe): fall back to folder existence.
+  // Only if that too is unusable do we reach for the PSADT marker — which detects just
+  // IntuneGet's own installs and requires the PSADT path to have written it.
+  if (installer.type === 'zip' || installer.type === 'portable') {
+    if (wingetId && version) {
+      return generateRegistryMarkerDetectionRules(wingetId, version, installer.scope, markerPath);
+    }
+    return generateFolderDetectionRules(installer, displayName);
+  }
+
+  return generateFolderDetectionRules(installer, displayName);
 }
 
 /**
@@ -128,40 +122,46 @@ function generateRegistryMarkerDetectionRules(
   ];
 }
 
+
 /**
- * Generate MSI-based detection rules
+ * Generate uninstall-registry detection rules — NATIVE, install-source-agnostic.
  *
- * Prefers the IntuneGet registry marker over the MSI Product Code because
- * product codes synced from winget manifests go stale - many MSI apps change
- * their product code every release, so the deployed code no longer matches
- * the installed one after an update. The PSADT install script writes the
- * marker for all installer types including MSI.
+ * Checks for the app's Add/Remove Programs (Uninstall) registry key, so it detects the
+ * app HOWEVER it was installed — by Intune, by an admin, by the user, or by an older
+ * non-IntuneGet package. This is the key advantage over the IntuneGet marker, which only
+ * detects apps IntuneGet itself installed.
+ *
+ * The uninstall subkey name comes from winget's `ProductCode`:
+ *  - MSI/WiX: the ProductCode GUID (e.g. `{7F0F0C51-...}`)
+ *  - exe/inno/nullsoft: winget puts the ARP DisplayName / uninstall key there
+ *    (e.g. `Notepad++`, `Mozilla Firefox 145.0 (x64 en-US)`)
+ *
+ * EXISTENCE-based (not version-compared): NormalizedInstaller does not carry
+ * DisplayVersion, so this detects "installed at all", not "installed at >= this version".
+ * Good enough for presence; version-aware upgrade detection would need
+ * AppsAndFeaturesEntries plumbed through (see DESIGN.md §2). Returns null when there is no
+ * usable ProductCode, so the caller can fall back.
  */
-function generateMsiDetectionRules(
-  installer: NormalizedInstaller,
-  displayName: string,
-  wingetId?: string,
-  version?: string,
-  markerPath?: string
-): DetectionRule[] {
-  // Primary: Registry marker detection (version-stable, written by PSADT)
-  if (wingetId && version) {
-    return generateRegistryMarkerDetectionRules(wingetId, version, installer.scope, markerPath);
-  }
+function generateUninstallRegistryDetectionRules(
+  installer: NormalizedInstaller
+): DetectionRule[] | null {
+  const key = installer.productCode?.trim();
+  if (!key) return null;
 
-  // Fallback: MSI Product Code detection
-  if (installer.productCode) {
-    return [
-      {
-        type: 'msi',
-        productCode: installer.productCode,
-        productVersionOperator: 'greaterThanOrEqual',
-      } as MsiDetectionRule,
-    ];
-  }
+  // User-scope apps register under HKCU; machine scope (default) under HKLM. On 64-bit
+  // Windows, 32-bit installers write to the WOW6432Node view — check32BitOn64System.
+  const hive = installer.scope === 'user' ? 'HKEY_CURRENT_USER' : 'HKEY_LOCAL_MACHINE';
+  const keyPath = `${hive}\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${key}`;
 
-  // Fallback: Folder existence detection
-  return generateFolderDetectionRules(installer, displayName);
+  return [
+    {
+      type: 'registry',
+      keyPath,
+      // No valueName: key existence alone is the detection.
+      detectionType: 'exists',
+      check32BitOn64System: installer.architecture === 'x86',
+    } as RegistryDetectionRule,
+  ];
 }
 
 /**
