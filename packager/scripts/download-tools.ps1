@@ -20,6 +20,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# -Force on Install-PackageProvider/Install-Module does NOT suppress the first-run
+# "install NuGet provider?" confirmation on a fresh box - only -Confirm:$false does.
+# Without this, an unattended run hangs forever waiting for input that never comes.
+$ConfirmPreference = "None"
 
 # Create tools directory if it doesn't exist
 if (-not (Test-Path $ToolsDir)) {
@@ -88,7 +92,7 @@ if (-not (Get-Module -ListAvailable -Name $moduleName)) {
         # First-run bootstrap: the NuGet provider must exist or Install-Module prompts
         # (fatal when unattended).
         if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false | Out-Null
         }
         # Trust PSGallery so the install doesn't prompt.
         if ((Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue).InstallationPolicy -ne "Trusted") {
@@ -103,7 +107,7 @@ if (-not (Get-Module -ListAvailable -Name $moduleName)) {
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         $scope = if ($isAdmin) { "AllUsers" } else { "CurrentUser" }
 
-        Install-Module -Name $moduleName -Scope $scope -Force -AllowClobber
+        Install-Module -Name $moduleName -Scope $scope -Force -Confirm:$false -AllowClobber
         Write-Host "Installed $moduleName successfully (scope: $scope)"
     }
     catch {

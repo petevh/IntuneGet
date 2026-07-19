@@ -10,7 +10,7 @@ import { PackagerConfig } from './config.js';
 import { PackagingJob, JobPoller } from './job-poller.js';
 import { IntuneUploader, IntuneAppResult, DuplicateAppError } from './intune-uploader.js';
 import { createLogger, Logger } from './logger.js';
-import { defaultSilentArgs } from './silent-args.js';
+import { defaultSilentArgs, resolveSilentArgs } from './silent-args.js';
 
 interface PackagingResult {
   intunewinPath: string;
@@ -31,6 +31,17 @@ interface PackagingResult {
     fileDigest: string;
     fileDigestAlgorithm: string;
   };
+}
+
+// Install/uninstall command lines for the native (non-PSADT) IntuneWin32App build
+// path. uninstallScript, when set, is written into the package's SourceFolder as
+// Uninstall.ps1 (Intune re-extracts the full .intunewin content for uninstall too,
+// so a companion script alongside the installer is available at that point).
+interface NativeCommands {
+  install: string;
+  uninstall: string;
+  setupFilePath: string;
+  uninstallScript: string | null;
 }
 
 export class JobProcessor {
@@ -77,15 +88,28 @@ export class JobProcessor {
         await poller.updateJobProgress(job.id, 30, 'Checksum verified');
       }
 
-      // Step 4: Create PSADT package (30-50%)
-      await poller.updateJobProgress(job.id, 30, 'Creating PSADT package...');
-      const packageDir = await this.createPsadtPackage(job, installerPath, jobWorkDir);
-      await poller.updateJobProgress(job.id, 50, 'PSADT package created');
+      // Step 4-5: Build the .intunewin package (30-70%). Two paths: native
+      // (IntuneWin32App, raw installer) when detection doesn't depend on the
+      // PSADT-written marker, else the existing PSADT wrapper. See
+      // usesNativeBuild() for the gating logic.
+      let result: PackagingResult;
+      let nativeCommands: NativeCommands | null = null;
 
-      // Step 5: Create .intunewin package (50-70%)
-      await poller.updateJobProgress(job.id, 50, 'Creating .intunewin package...');
-      const result = await this.createIntunewinPackage(packageDir, jobWorkDir);
-      await poller.updateJobProgress(job.id, 70, '.intunewin package created');
+      if (this.usesNativeBuild(job)) {
+        await poller.updateJobProgress(job.id, 30, 'Building native package...');
+        const installerFileName = path.basename(installerPath);
+        nativeCommands = this.buildNativeCommandLines(job, installerFileName);
+        result = await this.createNativeBuild(installerPath, jobWorkDir, nativeCommands);
+        await poller.updateJobProgress(job.id, 70, '.intunewin package created');
+      } else {
+        await poller.updateJobProgress(job.id, 30, 'Creating PSADT package...');
+        const packageDir = await this.createPsadtPackage(job, installerPath, jobWorkDir);
+        await poller.updateJobProgress(job.id, 50, 'PSADT package created');
+
+        await poller.updateJobProgress(job.id, 50, 'Creating .intunewin package...');
+        result = await this.createIntunewinPackage(packageDir, jobWorkDir);
+        await poller.updateJobProgress(job.id, 70, '.intunewin package created');
+      }
 
       // Step 6: Update status to uploading
       await poller.updateJobStatus(job.id, 'uploading');
@@ -106,7 +130,8 @@ export class JobProcessor {
             // Map upload progress (0-100) to overall progress (75-95)
             const overallPercent = 75 + Math.floor(percent * 0.2);
             await poller.updateJobProgress(job.id, overallPercent, message);
-          }
+          },
+          nativeCommands ?? undefined
         );
       } catch (error) {
         if (error instanceof DuplicateAppError) {
@@ -361,6 +386,183 @@ export class JobProcessor {
     }
 
     this.logger.debug('Checksum verified', { sha256: hash });
+  }
+
+  /**
+   * True when this job's detection doesn't depend on the PSADT-written
+   * registry marker, so it's safe to build via the native IntuneWin32App
+   * path (raw installer, no PSADT wrapper) instead.
+   *
+   * Deliberately derived from job.detection_rules rather than a separate
+   * "packaging method" flag: the web app (lib/detection-rules.ts) decides
+   * per-job whether detection needs the marker. Until that file is updated
+   * to prefer native detection (MSI product code / MSIX PFN / uninstall
+   * registry) over the marker, every job's detection_rules will still
+   * resolve to the marker rule, so this returns false for everything - the
+   * native path stays dormant with zero behavior change until then.
+   *
+   * zip is always PSADT: the native build path has no nested-installer
+   * extraction (that capability was intentionally dropped, see
+   * HANDOFF-intunewin32app.md's scope table).
+   */
+  private usesNativeBuild(job: PackagingJob): boolean {
+    if (job.installer_type.toLowerCase() === 'zip') {
+      return false;
+    }
+    return !this.isMarkerDetectionRule(job);
+  }
+
+  /**
+   * True if job.detection_rules contains a registry rule at the exact
+   * keyPath the PSADT path would write the IntuneGet marker to (same
+   * computation as getRegistryMarkerCreation, reused here to detect
+   * dependence on it rather than to write it).
+   */
+  private isMarkerDetectionRule(job: PackagingJob): boolean {
+    if (!Array.isArray(job.detection_rules)) {
+      return false;
+    }
+    const expectedKeyPath = `${this.getRegistryHive(job.install_scope)}\\${this.getRegistryMarkerPath(job)}\\${this.sanitizeWingetId(job.winget_id)}`.toLowerCase();
+
+    return job.detection_rules.some((rule) => {
+      const r = rule as Record<string, unknown>;
+      return (
+        r.type === 'registry' &&
+        typeof r.keyPath === 'string' &&
+        r.keyPath.toLowerCase() === expectedKeyPath
+      );
+    });
+  }
+
+  /**
+   * Build install/uninstall command lines for the native build path.
+   * The only PSADT feature carried over is the install/uninstall command
+   * override (psadtConfig.installCommand/uninstallCommand) - everything
+   * else (removeExistingInstall, verifyInstall, post-install/uninstall
+   * commands, zip nested-installer) is intentionally not supported here;
+   * see HANDOFF-intunewin32app.md's scope table.
+   */
+  private buildNativeCommandLines(job: PackagingJob, installerFileName: string): NativeCommands {
+    const installOverride = this.getCommandOverride(job, 'installCommand');
+    const uninstallOverride = this.getCommandOverride(job, 'uninstallCommand');
+
+    const installerType = job.installer_type.toLowerCase();
+    const isMsi = installerType === 'msi' || installerType === 'wix';
+    const silentArgs = resolveSilentArgs(job.installer_type).args;
+
+    const install =
+      installOverride ??
+      (isMsi
+        ? `msiexec /i "${installerFileName}" ${silentArgs}`.trim()
+        : `"${installerFileName}" ${silentArgs}`.trim());
+
+    if (uninstallOverride) {
+      return { install, uninstall: uninstallOverride, setupFilePath: installerFileName, uninstallScript: null };
+    }
+
+    if (isMsi) {
+      const productCodeMatch = job.uninstall_command.match(
+        /\{[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\}/
+      );
+      const uninstall = productCodeMatch
+        ? `msiexec /x ${productCodeMatch[0]} /qn /norestart`
+        : `msiexec /x "${installerFileName}" /qn /norestart`;
+      return { install, uninstall, setupFilePath: installerFileName, uninstallScript: null };
+    }
+
+    // No PSADT and no MSI product code: uninstall has to be resolved at
+    // runtime from the standard Windows Uninstall registry key by display
+    // name, same technique PSADT's Uninstall-ADTApplication uses internally.
+    return {
+      install,
+      uninstall: 'powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1',
+      setupFilePath: installerFileName,
+      uninstallScript: this.generateNativeUninstallScript(job, silentArgs),
+    };
+  }
+
+  /**
+   * Generate a standalone (PSADT-free) uninstall script that looks up the
+   * app's Uninstall registry entry by DisplayName and runs its
+   * QuietUninstallString, or UninstallString + silentArgs when no quiet
+   * variant is registered.
+   */
+  private generateNativeUninstallScript(job: PackagingJob, silentArgs: string): string {
+    const displayName = job.display_name.replace(/'/g, "''");
+    const silentArgsEscaped = silentArgs.replace(/'/g, "''");
+    const roots =
+      job.install_scope === 'user'
+        ? ["'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'"]
+        : [
+            "'HKLM:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'",
+            "'HKLM:\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\*'",
+          ];
+
+    return `$ErrorActionPreference = 'Stop'
+$name = '${displayName}'
+$app = Get-ItemProperty -Path ${roots.join(', ')} -ErrorAction SilentlyContinue |
+    Where-Object { $_.DisplayName -like "*$name*" } |
+    Select-Object -First 1
+if (-not $app) {
+    Write-Error "Uninstall registry entry not found for '$name'"
+    exit 1
+}
+if ($app.QuietUninstallString) {
+    $cmd = $app.QuietUninstallString
+} else {
+    $cmd = "$($app.UninstallString) ${silentArgsEscaped}"
+}
+Write-Host "Running uninstall: $cmd"
+$proc = Start-Process -FilePath cmd.exe -ArgumentList '/c', $cmd -Wait -PassThru -WindowStyle Hidden
+exit $proc.ExitCode
+`;
+  }
+
+  /**
+   * Build a .intunewin package via the community IntuneWin32App module,
+   * packaging the raw installer directly (no PSADT wrapper). The module
+   * wraps IntuneWinAppUtil.exe under the hood, so the output .intunewin
+   * has the same Detection.xml shape as the PSADT path's - extractPackageContents
+   * is reused unchanged.
+   */
+  private async createNativeBuild(
+    installerPath: string,
+    workDir: string,
+    commands: NativeCommands
+  ): Promise<PackagingResult> {
+    const sourceDir = path.join(workDir, 'Package');
+    await fs.promises.mkdir(sourceDir, { recursive: true });
+
+    const installerFileName = path.basename(installerPath);
+    await fs.promises.copyFile(installerPath, path.join(sourceDir, installerFileName));
+
+    if (commands.uninstallScript) {
+      await fs.promises.writeFile(path.join(sourceDir, 'Uninstall.ps1'), commands.uninstallScript);
+    }
+
+    const outputDir = path.join(workDir, 'Output');
+    await fs.promises.mkdir(outputDir, { recursive: true });
+
+    const intuneWinUtil = path.join(this.config.paths.tools, 'IntuneWinAppUtil.exe');
+    const escapedSource = sourceDir.replace(/'/g, "''");
+    const escapedSetup = installerFileName.replace(/'/g, "''");
+    const escapedOutput = outputDir.replace(/'/g, "''");
+    const escapedUtil = intuneWinUtil.replace(/'/g, "''");
+
+    await this.runPowerShell(
+      `Import-Module IntuneWin32App -ErrorAction Stop; ` +
+        `New-IntuneWin32AppPackage -SourceFolder '${escapedSource}' -SetupFile '${escapedSetup}' ` +
+        `-OutputFolder '${escapedOutput}' -IntuneWinAppUtilPath '${escapedUtil}' -Force | Out-Null`
+    );
+
+    const files = await fs.promises.readdir(outputDir);
+    const intunewinFile = files.find((f) => f.endsWith('.intunewin'));
+    if (!intunewinFile) {
+      throw new Error('New-IntuneWin32AppPackage did not generate a .intunewin file');
+    }
+
+    const intunewinPath = path.join(outputDir, intunewinFile);
+    return await this.extractPackageContents(intunewinPath, outputDir);
   }
 
   /**

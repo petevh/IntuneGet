@@ -187,7 +187,12 @@ export class IntuneUploader {
     encryptedContentPath: string,
     encryptionInfo: EncryptionInfo,
     sizes: { unencryptedSize: number; encryptedSize: number },
-    onProgress?: ProgressCallback
+    onProgress?: ProgressCallback,
+    // Set by job-processor for the native (non-PSADT) build path, where the
+    // install/uninstall/setupFilePath were already decided at packaging time.
+    // Omitted for the PSADT path, which keeps deriving them from psadtConfig
+    // via buildCommandLines below - unchanged.
+    commandsOverride?: { install: string; uninstall: string; setupFilePath: string }
   ): Promise<IntuneAppResult> {
     const graphClient = new GraphClient(this.config, job.tenant_id);
 
@@ -202,7 +207,7 @@ export class IntuneUploader {
 
     // Step 1: Create Win32 LOB App (5%)
     await onProgress?.(5, 'Creating app in Intune...');
-    const app = await this.createWin32App(graphClient, job, encryptedContentPath);
+    const app = await this.createWin32App(graphClient, job, encryptedContentPath, commandsOverride);
     this.logger.info('Created Win32 LOB App', { appId: app.id });
 
     // Step 2: Create content version (10%)
@@ -334,9 +339,11 @@ export class IntuneUploader {
   private async createWin32App(
     graphClient: GraphClient,
     job: PackagingJob,
-    encryptedContentPath: string
+    encryptedContentPath: string,
+    commandsOverride?: { install: string; uninstall: string; setupFilePath: string }
   ): Promise<{ id: string }> {
-    const commands = this.buildCommandLines(job);
+    const commands = commandsOverride ?? this.buildCommandLines(job);
+    const setupFilePath = commandsOverride?.setupFilePath ?? 'Invoke-AppDeployToolkit.exe';
     const baseDescription = extractPackageDescription(
       job.package_config,
       `${job.display_name} ${job.version} - Deployed via IntuneGet from Winget: ${job.winget_id}`
@@ -368,7 +375,7 @@ export class IntuneUploader {
       // rejected ("Unknown MinimumSupportedWindowsRelease") by this property.
       minimumSupportedWindowsRelease: '1903',
       runAs32Bit: false,
-      setupFilePath: 'Invoke-AppDeployToolkit.exe',
+      setupFilePath,
       installExperience: {
         runAsAccount: job.install_scope === 'user' ? 'user' : 'system',
         deviceRestartBehavior: 'suppress',
