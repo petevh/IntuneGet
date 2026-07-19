@@ -51,16 +51,31 @@ auth path; don't route the Kemyion secret through PowerShell.
    Detection.xml, as the current `createIntunewinPackage` already does). **Delete** the
    dropped-feature code paths as PSADT goes: post-install/uninstall commands,
    removeExistingInstall, verifyInstall, zip nested-installer.
-2. **Detection marker — THE real design problem (§2).** For `exe/inno/nullsoft/burn/
-   portable/zip`, the web app's `lib/detection-rules.ts` emits a REGISTRY-MARKER detection
-   at `HKLM\SOFTWARE\IntuneGet\Apps\{winget_id}` that only works because the PSADT script
-   WRITES that marker at install. Dropping PSADT removes the writer → those apps detect
-   nothing. Options: (i) re-emit the marker via a tiny post-install step (a one-line reg
-   write, not full PSADT), or (ii) switch those types to folder/uninstall detection (less
-   reliable — why upstream chose the marker). MSI (productCode) + MSIX (PFN script) are
-   unaffected. Recommend (i).
-3. **Retire PSADT provisioning** in `download-tools.ps1` (the PSAppDeployToolkit download)
-   only AFTER steps 1–2 work end-to-end. Kept for now so the branch isn't broken mid-transition.
+2. **Detection — prefer NATIVE, marker only as last resort (CORRECTED — the marker
+   affects EVERY app, not just non-MSI).** `lib/detection-rules.ts::generateMsiDetectionRules`
+   (and the other branches) `return` the registry-marker rule whenever `wingetId+version`
+   are present — i.e. always — so the productCode/folder branches are DEAD CODE at runtime.
+   The marker (`HKLM\SOFTWARE\IntuneGet\Apps\{id}\Version`) is written ONLY by PSADT, so
+   dropping PSADT breaks detection for ALL apps. (The earlier "MSI unaffected" note here was
+   wrong — thanks to the Windows-side review that caught it.)
+   **Decision (Pete):** don't re-emit the marker — stop depending on it. The marker only
+   detects apps *IntuneGet* installed; native detection also captures out-of-band installs
+   (IT/user/older packages), which is the real goal. Verified: winget manifests carry a
+   native signal for almost everything — `ProductCode` is present even on nullsoft/inno EXE
+   (it's the uninstall DisplayName, e.g. `Notepad++`), a GUID on MSI/WiX, `PackageFamilyName`
+   on MSIX. Implement the tiered hierarchy (full table in DESIGN.md §2):
+     - MSI/WiX → MSI product-code detection
+     - MSIX/AppX → PackageFamilyName script detection
+     - exe/inno/nullsoft WITH a manifest ProductCode → uninstall-registry (DisplayName/Version)
+     - zip/portable/exe with NO ProductCode → PSADT + marker (the marker's legitimate tail)
+   **CROSS-HOST:** tiers for native detection require editing `lib/detection-rules.ts` to
+   prefer native over the marker (flip the current marker-first order). That file is in the
+   WEB APP (outside `packager/`), so this change also affects the running container on the
+   Docker VM — coordinate it; it's not a packager-only edit. It benefits every deployment,
+   not just the new path.
+3. **PSADT is KEPT (not retired) as the Tier-5 fallback** for zip/portable/markerless-exe.
+   Leave `download-tools.ps1`'s PSAppDeployToolkit download in place. PSADT just stops being
+   the *default* path — the packager picks IntuneWin32App vs PSADT per the hierarchy.
 4. **Provisioning check on the VM:** run `download-tools.ps1` (or start the packager) and
    confirm `Get-Module -ListAvailable IntuneWin32App` lists 1.5.0 under the packager account.
 
