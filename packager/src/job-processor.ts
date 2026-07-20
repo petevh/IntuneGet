@@ -181,8 +181,70 @@ export class JobProcessor {
   /**
    * Ensure required tools are downloaded
    * This method is public to allow standalone tool setup without processing jobs
+   *
+   * Runs under a cross-process file lock: two packager instances (e.g. one left
+   * running after a failed shutdown, one started manually) can otherwise both
+   * decide tools need (re-)provisioning at once and both write
+   * tools/IntuneWinAppUtil.exe via Invoke-WebRequest -OutFile at the same time -
+   * a process spawning the exe mid-overwrite reads a truncated PE and dies with
+   * STATUS_DLL_INIT_FAILED (0xC0000142) and no stdout/stderr. Root-caused on the
+   * VM 2026-07-20 after finding two live instances polling concurrently.
    */
   async ensureToolsAvailable(): Promise<void> {
+    await this.withToolsLock(() => this.ensureToolsAvailableUnlocked());
+  }
+
+  /**
+   * Acquire a cross-process lock (a lockfile created with exclusive 'wx' open)
+   * before running fn, and always release it afterward. A lock older than
+   * STALE_LOCK_MS is assumed to be left by a crashed process and is taken over.
+   */
+  private async withToolsLock<T>(fn: () => Promise<T>): Promise<T> {
+    const STALE_LOCK_MS = 5 * 60 * 1000;
+    const POLL_MS = 500;
+    const MAX_WAIT_MS = 10 * 60 * 1000;
+
+    const toolsDir = this.config.paths.tools;
+    await fs.promises.mkdir(toolsDir, { recursive: true });
+    const lockPath = path.join(toolsDir, '.tools.lock');
+
+    const waitStart = Date.now();
+    for (;;) {
+      try {
+        const handle = await fs.promises.open(lockPath, 'wx');
+        await handle.writeFile(`${process.pid}\n${new Date().toISOString()}\n`);
+        await handle.close();
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+          throw err;
+        }
+        try {
+          const stat = await fs.promises.stat(lockPath);
+          if (Date.now() - stat.mtimeMs > STALE_LOCK_MS) {
+            this.logger.warn('Removing stale tools lock', { lockPath });
+            await fs.promises.rm(lockPath, { force: true });
+            continue;
+          }
+        } catch {
+          // Lock disappeared between the failed open and this stat - retry the open.
+          continue;
+        }
+        if (Date.now() - waitStart > MAX_WAIT_MS) {
+          throw new Error(`Timed out waiting for tools lock at ${lockPath}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      }
+    }
+
+    try {
+      return await fn();
+    } finally {
+      await fs.promises.rm(lockPath, { force: true });
+    }
+  }
+
+  private async ensureToolsAvailableUnlocked(): Promise<void> {
     const toolsDir = this.config.paths.tools;
     await fs.promises.mkdir(toolsDir, { recursive: true });
 
