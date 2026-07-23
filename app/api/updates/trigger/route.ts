@@ -325,6 +325,12 @@ export async function POST(request: NextRequest) {
               installerType: installerInfo.installerType || deploymentConfig.installerType || 'exe',
               nestedInstallerType: installerInfo.nestedInstallerType,
               nestedInstallerPath: installerInfo.nestedInstallerPath,
+              // NOTE: the auto-update path does not yet resolve the manifest's
+              // Custom switches (e.g. ACCEPT_EULA=1) — deploymentConfig carries
+              // no normalized silentArgs, so this still re-derives from the
+              // install command and remains subject to UPSTREAM-ISSUES.md #2's
+              // KEY=VALUE drop. Tracked there as a separate follow-up; the
+              // interactive cart→package path is fixed via item.silentArgs.
               silentSwitches: extractSilentSwitches(
                 deploymentConfig.installCommand || '',
                 installerInfo.installerType || deploymentConfig.installerType || 'exe'

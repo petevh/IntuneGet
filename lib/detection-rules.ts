@@ -280,7 +280,7 @@ export function generateInstallCommand(
   scope: WingetScope = 'machine'
 ): string {
   const installerName = resolveInstallerFileName(installer.url, installer.type);
-  const silentArgs = installer.silentArgs || getDefaultSilentArgs(installer.type);
+  const silentArgs = resolveSilentArgs(installer);
 
   switch (installer.type) {
     case 'msi':
@@ -382,7 +382,24 @@ function generateRegistryUninstallCommand(
 /**
  * Get default silent arguments based on installer type
  */
-function getDefaultSilentArgs(type: WingetInstallerType): string {
+/**
+ * Resolve the silent install switches for an installer, as a structured string.
+ *
+ * This is the single source of truth for the exe-family silent switches, and the
+ * value that must be carried to the packager verbatim. It preserves whatever the
+ * manifest normalization produced (`installer.silentArgs`, which already folds in
+ * `InstallerSwitches.Custom` such as `ACCEPT_EULA=1`), falling back to the
+ * per-type default only when the manifest declared no switches.
+ *
+ * Callers must NOT re-derive switches by re-parsing a built install-command
+ * string — that round-trip silently drops bare `KEY=VALUE` switches. See
+ * UPSTREAM-ISSUES.md #2.
+ */
+export function resolveSilentArgs(installer: NormalizedInstaller): string {
+  return installer.silentArgs || getDefaultSilentArgs(installer.type);
+}
+
+export function getDefaultSilentArgs(type: WingetInstallerType): string {
   const defaults: Record<WingetInstallerType, string> = {
     msi: '/qn /norestart',
     msix: '',

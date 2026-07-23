@@ -53,7 +53,8 @@ import type { EspProfileSelection } from '@/types/esp';
 import { DEFAULT_PSADT_CONFIG, getDefaultProcessesToClose } from '@/types/psadt';
 import { useCartStore, createStoreCartItem } from '@/stores/cart-store';
 import { useUpdateAppSettings } from '@/hooks/use-update-app-settings';
-import { generateDetectionRules, generateInstallCommand, generateUninstallCommand } from '@/lib/detection-rules';
+import { generateDetectionRules, generateInstallCommand, generateUninstallCommand, resolveSilentArgs } from '@/lib/detection-rules';
+import { extractSilentSwitches } from '@/lib/msp/silent-switches';
 import { INTUNE_APP_SOURCE_MARKER } from '@/lib/intune-description';
 
 // Strip the auto-appended "Source: IntuneGet.com" marker so the description
@@ -389,6 +390,13 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
           nestedInstallerPath: selectedInstaller!.nestedInstallerPath,
           manifestDependencies: selectedInstaller!.packageDependencies,
           installCommand: config.installCommand || generateInstallCommand(selectedInstaller!, selectedScope),
+          // Carry normalized silent switches so the packager doesn't re-parse
+          // them out of installCommand (drops KEY=VALUE — UPSTREAM-ISSUES.md #2).
+          // If the user overrode installCommand, derive from that override;
+          // otherwise use the manifest-normalized value.
+          silentArgs: config.installCommand
+            ? extractSilentSwitches(config.installCommand, selectedInstaller!.type)
+            : resolveSilentArgs(selectedInstaller!),
           uninstallCommand: config.uninstallCommand || generateUninstallCommand(selectedInstaller!, pkg.name),
           detectionRules: config.detectionRules,
           psadtConfig: config,

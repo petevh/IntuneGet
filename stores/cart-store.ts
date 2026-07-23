@@ -244,7 +244,7 @@ export function createCartItem(
   psadtConfig?: Partial<PSADTConfig>
 ): Omit<Win32CartItem, 'id' | 'addedAt'> {
   // Import detection rule generator
-  const { generateDetectionRules, generateInstallCommand, generateUninstallCommand } = require('@/lib/detection-rules');
+  const { generateDetectionRules, generateInstallCommand, generateUninstallCommand, resolveSilentArgs } = require('@/lib/detection-rules');
 
   // Pass wingetId and version for registry marker detection (most reliable for EXE installers)
   // A custom marker root from the provided psadtConfig is honored at generation time
@@ -270,6 +270,7 @@ export function createCartItem(
     installerUrl: installer.url,
     installerSha256: installer.sha256,
     installCommand: generateInstallCommand(installer, installScope),
+    silentArgs: resolveSilentArgs(installer),
     uninstallCommand: generateUninstallCommand(installer, displayName),
     detectionRules,
     psadtConfig: {

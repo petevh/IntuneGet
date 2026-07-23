@@ -22,6 +22,7 @@ import {
   generateDetectionRules,
   generateInstallCommand,
   generateUninstallCommand,
+  resolveSilentArgs,
 } from '@/lib/detection-rules';
 import { cn } from '@/lib/utils';
 import { DEFAULT_PSADT_CONFIG, getDefaultProcessesToClose } from '@/types/psadt';
@@ -120,6 +121,7 @@ export function PackageDetails({ package: pkg, onClose }: PackageDetailsProps) {
       nestedInstallerPath: selectedInstaller.nestedInstallerPath,
       manifestDependencies: selectedInstaller.packageDependencies,
       installCommand: generateInstallCommand(selectedInstaller, selectedScope),
+      silentArgs: resolveSilentArgs(selectedInstaller),
       uninstallCommand: generateUninstallCommand(selectedInstaller, pkg.name),
       detectionRules,
       psadtConfig: {

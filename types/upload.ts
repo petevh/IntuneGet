@@ -174,6 +174,10 @@ export interface Win32CartItem extends CartItemBase {
   installerUrl: string;
   installerSha256: string;
   installCommand: string;
+  // Normalized silent switches, carried as structured data so the packager does
+  // not have to re-parse them back out of installCommand (which drops bare
+  // KEY=VALUE switches like ACCEPT_EULA=1 — see UPSTREAM-ISSUES.md #2).
+  silentArgs: string;
   uninstallCommand: string;
   detectionRules: DetectionRule[];
   requirementRules?: RequirementRule[];

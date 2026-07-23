@@ -2,7 +2,7 @@
 
 import { useCallback } from 'react';
 import { useCartStore } from '@/stores/cart-store';
-import { generateDetectionRules, generateInstallCommand, generateUninstallCommand } from '@/lib/detection-rules';
+import { generateDetectionRules, generateInstallCommand, generateUninstallCommand, resolveSilentArgs } from '@/lib/detection-rules';
 import { DEFAULT_PSADT_CONFIG, getDefaultProcessesToClose } from '@/types/psadt';
 import type { NormalizedPackage } from '@/types/winget';
 
@@ -82,6 +82,7 @@ export function useBulkAdd(): UseBulkAddReturn {
               installerUrl: installer.url,
               installerSha256: installer.sha256,
               installCommand: generateInstallCommand(installer, installer.scope || 'machine'),
+              silentArgs: resolveSilentArgs(installer),
               uninstallCommand: generateUninstallCommand(installer, pkg.name),
               detectionRules,
               iconPath: pkg.iconPath,

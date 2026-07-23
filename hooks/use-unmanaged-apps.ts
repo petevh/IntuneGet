@@ -5,7 +5,7 @@ import { useMicrosoftAuth } from '@/hooks/useMicrosoftAuth';
 import { useMspOptional } from '@/hooks/useMspOptional';
 import { useUserSettings } from '@/components/providers/UserSettingsProvider';
 import { useCartStore } from '@/stores/cart-store';
-import { generateDetectionRules, generateInstallCommand, generateUninstallCommand } from '@/lib/detection-rules';
+import { generateDetectionRules, generateInstallCommand, generateUninstallCommand, resolveSilentArgs } from '@/lib/detection-rules';
 import { DEFAULT_PSADT_CONFIG, getDefaultProcessesToClose } from '@/types/psadt';
 import { toast } from '@/hooks/use-toast';
 import type {
@@ -396,6 +396,7 @@ export function useUnmanagedApps(): UseUnmanagedAppsReturn {
           recommendedInstaller,
           recommendedInstaller.scope || 'machine'
         ),
+        silentArgs: resolveSilentArgs(recommendedInstaller),
         uninstallCommand: generateUninstallCommand(
           recommendedInstaller,
           manifest?.name || app.displayName
@@ -502,6 +503,7 @@ export function useUnmanagedApps(): UseUnmanagedAppsReturn {
           recommendedInstaller,
           recommendedInstaller.scope || 'machine'
         ),
+        silentArgs: resolveSilentArgs(recommendedInstaller),
         uninstallCommand: generateUninstallCommand(
           recommendedInstaller,
           manifest?.name || app.displayName

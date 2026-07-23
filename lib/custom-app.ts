@@ -13,6 +13,7 @@ import {
   generateDetectionRules,
   generateInstallCommand,
   generateUninstallCommand,
+  resolveSilentArgs,
 } from '@/lib/detection-rules';
 import { DEFAULT_PSADT_CONFIG } from '@/types/psadt';
 import type {
@@ -149,6 +150,7 @@ export function buildCustomAppCartItem(input: CustomAppInput): CustomAppCartItem
     installerUrl,
     installerSha256: sha256,
     installCommand: generateInstallCommand(installer, input.installScope),
+    silentArgs: resolveSilentArgs(installer),
     uninstallCommand: input.uninstallCommand?.trim() || generateUninstallCommand(installer, displayName),
     detectionRules,
     iconPath: iconUrl || undefined,
