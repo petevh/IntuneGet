@@ -1191,6 +1191,11 @@ ${steps}
     // -, which silently dropped bare KEY=VALUE switches (e.g. ACCEPT_EULA=1, a
     // --campaign value) and, for hyphenated filenames, could match into the
     // filename itself. See UPSTREAM-ISSUES.md #2.
+    // Known limitation: the ^\S+ branch only strips a single whitespace-delimited
+    // token, so an *unquoted* path containing spaces (e.g. "C:\Program Files\
+    // App\setup.exe /S") is mis-split. Not fixed because generateInstallCommand
+    // (web app, detection-rules.ts) always quotes the installer path, so this
+    // input doesn't occur in practice - see UPSTREAM-ISSUES.md #2 discussion.
     const trimmed = installCommand.trim();
     const leadingToken = trimmed.match(/^"[^"]+"|^\S+/)?.[0] ?? '';
     const looksLikeSwitch = /^[/-]/.test(leadingToken);

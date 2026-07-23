@@ -179,6 +179,14 @@ describe('extractSilentSwitches', () => {
     expect(result).toBe('--quiet --wait');
   });
 
+  it('KNOWN LIMITATION: mis-splits an unquoted path containing spaces', () => {
+    // generateInstallCommand (web app, detection-rules.ts) always quotes the
+    // installer path, so this input doesn't occur in practice - documenting the
+    // current (wrong) behavior rather than a requirement, per UPSTREAM-ISSUES.md #2.
+    const result = processor().extractSilentSwitches('C:\\Program Files\\App\\setup.exe /S', 'exe');
+    expect(result).toBe('Files\\App\\setup.exe /S');
+  });
+
   it('falls back to the type default when there are no switches after the path', () => {
     const result = processor().extractSilentSwitches('"7zip-setup.exe"', 'nullsoft');
     expect(result).toBe('/S');
