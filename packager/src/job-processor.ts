@@ -1184,10 +1184,20 @@ ${steps}
    * Extract silent switches from install command
    */
   private extractSilentSwitches(installCommand: string, installerType: string): string {
-    // Try to extract switches from the install command
-    const switchMatch = installCommand.match(/(?:\/\S+|-\S+)(?:\s+(?:\/\S+|-\S+))*/);
-    if (switchMatch && switchMatch[0] !== '-DeploymentType') {
-      return switchMatch[0];
+    // Strip the leading installer path (quoted, or a single bare token) and treat
+    // everything after it as the switches, verbatim. The previous approach
+    // instead re-derived switches by matching /-prefixed tokens directly out of
+    // installCommand and stopped at the first token that didn't start with / or
+    // -, which silently dropped bare KEY=VALUE switches (e.g. ACCEPT_EULA=1, a
+    // --campaign value) and, for hyphenated filenames, could match into the
+    // filename itself. See UPSTREAM-ISSUES.md #2.
+    const trimmed = installCommand.trim();
+    const leadingToken = trimmed.match(/^"[^"]+"|^\S+/)?.[0] ?? '';
+    const looksLikeSwitch = /^[/-]/.test(leadingToken);
+    const switches = looksLikeSwitch ? trimmed : trimmed.slice(leadingToken.length).trim();
+
+    if (switches && !switches.startsWith('-DeploymentType')) {
+      return switches;
     }
 
     // Fall back to the per-type default (shared with the IntuneWin32App path). A bare

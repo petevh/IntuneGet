@@ -52,6 +52,7 @@ function processor() {
       job: PackagingJob,
       installerFileName: string
     ): { install: string; uninstall: string; setupFilePath: string; uninstallScript: string | null };
+    extractSilentSwitches(installCommand: string, installerType: string): string;
   };
 }
 
@@ -145,5 +146,49 @@ describe('buildNativeCommandLines', () => {
     expect(result.install).toBe('custom-install.cmd /quiet');
     expect(result.uninstall).toBe('custom-uninstall.cmd /quiet');
     expect(result.uninstallScript).toBeNull();
+  });
+});
+
+describe('extractSilentSwitches', () => {
+  it('preserves a bare KEY=VALUE switch (UPSTREAM-ISSUES.md #2, ACCEPT_EULA)', () => {
+    const result = processor().extractSilentSwitches(
+      '"PowerBIDesktopSetup.exe" /quiet /norestart ACCEPT_EULA=1',
+      'burn'
+    );
+    expect(result).toBe('/quiet /norestart ACCEPT_EULA=1');
+  });
+
+  it('preserves a switch whose value has no leading / or -, e.g. --campaign <id>', () => {
+    const result = processor().extractSilentSwitches(
+      '"vs_SSMS.exe" --quiet --wait --campaign 8f2c1e-some-campaign-id',
+      'burn'
+    );
+    expect(result).toBe('--quiet --wait --campaign 8f2c1e-some-campaign-id');
+  });
+
+  it('does not leak a hyphenated filename fragment into the switches', () => {
+    const result = processor().extractSilentSwitches(
+      '"PBIDesktopSetup-2026-07_x64.exe" /quiet /norestart ACCEPT_EULA=1',
+      'burn'
+    );
+    expect(result).toBe('/quiet /norestart ACCEPT_EULA=1');
+  });
+
+  it('handles an unquoted leading installer path', () => {
+    const result = processor().extractSilentSwitches('vs_SSMS.exe --quiet --wait', 'burn');
+    expect(result).toBe('--quiet --wait');
+  });
+
+  it('falls back to the type default when there are no switches after the path', () => {
+    const result = processor().extractSilentSwitches('"7zip-setup.exe"', 'nullsoft');
+    expect(result).toBe('/S');
+  });
+
+  it('falls back to default rather than emitting a bare -DeploymentType', () => {
+    const result = processor().extractSilentSwitches(
+      '-DeploymentType Install -DeployMode Silent',
+      'exe'
+    );
+    expect(result).toBe('/S');
   });
 });
