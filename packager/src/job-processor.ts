@@ -10,7 +10,7 @@ import { PackagerConfig } from './config.js';
 import { PackagingJob, JobPoller } from './job-poller.js';
 import { IntuneUploader, IntuneAppResult, DuplicateAppError } from './intune-uploader.js';
 import { createLogger, Logger } from './logger.js';
-import { defaultSilentArgs, resolveSilentArgs } from './silent-args.js';
+import { defaultSilentArgs } from './silent-args.js';
 
 interface PackagingResult {
   intunewinPath: string;
@@ -510,7 +510,11 @@ export class JobProcessor {
 
     const installerType = job.installer_type.toLowerCase();
     const isMsi = installerType === 'msi' || installerType === 'wix';
-    const silentArgs = resolveSilentArgs(job.installer_type).args;
+    // Same extraction used for the PSADT path (generateDeployScript) so both
+    // paths use winget's real switches when job.install_command carries them,
+    // rather than a generic per-type default/guess that ignores what winget
+    // actually declared (e.g. SSMS's --campaign <id>, Power BI's ACCEPT_EULA=1).
+    const silentArgs = this.extractSilentSwitches(job.install_command, job.installer_type);
 
     const install =
       installOverride ??

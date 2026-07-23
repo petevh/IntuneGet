@@ -116,6 +116,7 @@ describe('buildNativeCommandLines', () => {
   it('builds msiexec install/uninstall for MSI using the product code when present', () => {
     const job = makeJob({
       installer_type: 'msi',
+      install_command: '"app.msi"',
       uninstall_command: 'msiexec /x {11111111-2222-3333-4444-555555555555} /qn',
     });
     const result = processor().buildNativeCommandLines(job, 'app.msi');
@@ -126,10 +127,33 @@ describe('buildNativeCommandLines', () => {
   });
 
   it('falls back to a filename-based msiexec uninstall when no product code is present', () => {
-    const job = makeJob({ installer_type: 'msi', uninstall_command: '' });
+    const job = makeJob({ installer_type: 'msi', install_command: '"app.msi"', uninstall_command: '' });
     const result = processor().buildNativeCommandLines(job, 'app.msi');
 
     expect(result.uninstall).toBe('msiexec /x "app.msi" /qn /norestart');
+  });
+
+  it('uses winget real switches (not a per-type guess) when install_command carries them', () => {
+    // Regression test for a live failure: SSMS's real switches are
+    // `--quiet --wait --campaign <id>` (installer_type not recognized as a
+    // known default), but buildNativeCommandLines previously called
+    // resolveSilentArgs(job.installer_type) with no winget args at all, so it
+    // always fell back to a guessed `/S` - which SSMS's installer doesn't
+    // understand, causing it to hang instead of installing silently.
+    const job = makeJob({
+      installer_type: 'burn',
+      install_command: '"vs_SSMS.exe" --quiet --wait --campaign 8f2c1e-some-campaign-id',
+    });
+    const result = processor().buildNativeCommandLines(job, 'vs_SSMS.exe');
+
+    expect(result.install).toBe('"vs_SSMS.exe" --quiet --wait --campaign 8f2c1e-some-campaign-id');
+  });
+
+  it('falls back to the per-type default when install_command carries no separate switches', () => {
+    const job = makeJob({ installer_type: 'burn', install_command: '"vs_SSMS.exe"' });
+    const result = processor().buildNativeCommandLines(job, 'vs_SSMS.exe');
+
+    expect(result.install).toBe('"vs_SSMS.exe" /q /norestart');
   });
 
   it('prefers the psadtConfig install/uninstall override over any default', () => {
