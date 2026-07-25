@@ -53,6 +53,26 @@ interface PackageApiResponse {
   message?: string;
 }
 
+interface DeploymentError {
+  title: string;
+  message: string;
+  retryable: boolean;
+  blockedBeforeDispatch?: boolean;
+  packageName?: string;
+  packageVersion?: string;
+}
+
+interface PackageApiErrorResponse {
+  error?: string;
+  message?: string;
+  code?: string;
+  retryable?: boolean;
+  package?: {
+    displayName?: string;
+    version?: string;
+  };
+}
+
 export function UploadCart() {
   const router = useRouter();
   const items = useCartStore((state) => state.items);
@@ -60,10 +80,15 @@ export function UploadCart() {
   const toggleCart = useCartStore((state) => state.toggleCart);
   const closeCart = useCartStore((state) => state.closeCart);
   const removeItem = useCartStore((state) => state.removeItem);
+  const updateItem = useCartStore((state) => state.updateItem);
   const clearCart = useCartStore((state) => state.clearCart);
   const [isDeploying, setIsDeploying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [showLargeDeployConfirm, setShowLargeDeployConfirm] = useState(false);
+  const [error, setError] = useState<DeploymentError | null>(null);
   const [editingItem, setEditingItem] = useState<CartItem | null>(null);
+  // winget id -> email of whoever already deployed it in this tenant, so we can
+  // warn before a teammate's app is deployed a second time.
+  const [tenantDeployedBy, setTenantDeployedBy] = useState<Map<string, string | null>>(new Map());
 
   const { isAuthenticated, getAccessToken, signIn, requestAdminConsent } = useMicrosoftAuth();
   const { isMspUser, selectedTenantId } = useMspOptional();
@@ -83,15 +108,49 @@ export function UploadCart() {
     }
   }, [isOpen, isAuthenticated, permissionStatus, verify]);
 
-  // Escape key handler for sidebar
+  // Load tenant-wide deployments when the cart opens so we can flag apps a
+  // teammate already deployed (non-fatal: on any failure we just skip warnings).
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen || !isAuthenticated || items.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const accessToken = await getAccessToken();
+        if (!accessToken) return;
+        const response = await fetch('/api/intune/apps/deployed?scope=tenant', {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            ...(isMspUser && selectedTenantId ? { 'X-MSP-Tenant-Id': selectedTenantId } : {}),
+          },
+        });
+        if (!response.ok || cancelled) return;
+        const data = await response.json();
+        const map = new Map<string, string | null>();
+        for (const d of (data.tenantDeployments || []) as { wingetId: string; deployedBy: string | null }[]) {
+          map.set(d.wingetId, d.deployedBy);
+        }
+        if (!cancelled) setTenantDeployedBy(map);
+      } catch {
+        // Non-fatal: no warnings shown
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, isAuthenticated, items.length, getAccessToken, isMspUser, selectedTenantId]);
+
+  // Escape key handler for sidebar. Radix dialogs prevent default on Escape
+  // but the event still bubbles to document, so yield while a nested overlay
+  // (item config, large-deploy confirm) is open - Escape should dismiss that
+  // layer, not the whole cart.
+  useEffect(() => {
+    if (!isOpen || editingItem || showLargeDeployConfirm) return;
     const handleEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape') closeCart();
     };
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [isOpen, closeCart]);
+  }, [isOpen, editingItem, showLargeDeployConfirm, closeCart]);
 
   const handleFixPermissions = () => {
     if (permissionError === 'network_error') {
@@ -110,14 +169,22 @@ export function UploadCart() {
     if (!isAuthenticated) {
       const signedIn = await signIn();
       if (!signedIn) {
-        setError('Please sign in with Microsoft to deploy packages.');
+        setError({
+          title: 'Microsoft sign-in required',
+          message: 'Please sign in with Microsoft to deploy packages.',
+          retryable: true,
+        });
         return;
       }
     }
 
     const accessToken = await getAccessToken();
     if (!accessToken) {
-      setError('Failed to get access token. Please sign in again.');
+      setError({
+        title: 'Microsoft sign-in expired',
+        message: 'Failed to get an access token. Please sign in again.',
+        retryable: true,
+      });
       return;
     }
 
@@ -137,7 +204,23 @@ export function UploadCart() {
       if (!response.ok) {
         const contentType = response.headers.get('content-type');
         if (contentType?.includes('application/json')) {
-          const errorData = await response.json();
+          const errorData = await response.json() as PackageApiErrorResponse;
+          if (response.status === 409 || Boolean(errorData.code)) {
+            const packageLabel = errorData.package?.displayName;
+            const versionLabel = errorData.package?.version;
+            const retryable = errorData.retryable === true;
+            setError({
+              title: retryable
+                ? 'Installer verification temporarily unavailable'
+                : 'Deployment blocked before upload',
+              message: errorData.message || errorData.error || 'The installer could not be verified safely.',
+              retryable,
+              blockedBeforeDispatch: true,
+              packageName: packageLabel,
+              packageVersion: versionLabel,
+            });
+            return;
+          }
           throw new Error(errorData.message || errorData.error || 'Failed to queue packaging jobs');
         }
         throw new Error(`Deployment failed (${response.status})`);
@@ -162,7 +245,11 @@ export function UploadCart() {
       router.push(`/dashboard/uploads?jobs=${jobIds}`);
     } catch (err) {
       console.error('Deploy error:', err);
-      setError(err instanceof Error ? err.message : 'Failed to deploy packages');
+      setError({
+        title: 'Deployment could not be started',
+        message: err instanceof Error ? err.message : 'Failed to deploy packages',
+        retryable: true,
+      });
     } finally {
       setIsDeploying(false);
     }
@@ -170,6 +257,16 @@ export function UploadCart() {
 
   const handleClearAll = () => {
     clearCart();
+  };
+
+  // Large batches get an explicit review step; small carts stay one-click.
+  const LARGE_DEPLOY_THRESHOLD = 10;
+  const handleDeployClick = () => {
+    if (items.length >= LARGE_DEPLOY_THRESHOLD) {
+      setShowLargeDeployConfirm(true);
+    } else {
+      handleDeploy();
+    }
   };
 
   return (
@@ -314,6 +411,30 @@ export function UploadCart() {
                           </span>
                         )}
                       </div>
+
+                      {/* Teammate-duplicate warning: this app was already
+                          deployed to the tenant by someone. Deploying again
+                          would create a second Intune app unless forced. */}
+                      {tenantDeployedBy.has(item.wingetId) && !item.forceCreate && (
+                        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-2.5 dark:border-amber-500/20 dark:bg-amber-500/10">
+                          <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-amber-400" />
+                          <div className="text-xs flex-1">
+                            <p className="font-medium text-amber-900 dark:text-amber-300">Already deployed in this tenant</p>
+                            <p className="mt-0.5 text-amber-800 dark:text-amber-200/80">
+                              {tenantDeployedBy.get(item.wingetId)
+                                ? `Deployed by ${tenantDeployedBy.get(item.wingetId)}. Deploying again is skipped unless you deploy as a new app.`
+                                : 'Deploying again is skipped unless you deploy as a new app.'}
+                            </p>
+                            <button
+                              onClick={() => updateItem(item.id, { forceCreate: true })}
+                              disabled={isDeploying}
+                              className="mt-1.5 font-medium text-amber-800 underline underline-offset-2 transition-colors hover:text-amber-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-600 focus-visible:ring-offset-2 disabled:opacity-50 dark:text-amber-300 dark:hover:text-amber-200 dark:focus-visible:ring-amber-400 dark:focus-visible:ring-offset-bg-elevated"
+                            >
+                              Deploy as new app anyway
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -339,8 +460,25 @@ export function UploadCart() {
                   <div className="flex items-start gap-3 p-3 bg-status-error/10 border border-status-error/20 rounded-lg">
                     <AlertCircle className="w-5 h-5 text-status-error flex-shrink-0 mt-0.5" />
                     <div className="text-sm">
-                      <p className="text-status-error font-medium">Deployment failed</p>
-                      <p className="text-status-error/70 mt-1">{error}</p>
+                      <p className="text-status-error font-medium">{error.title}</p>
+                      {(error.packageName || error.packageVersion) && (
+                        <p className="text-text-secondary mt-1">
+                          {[error.packageName, error.packageVersion && `v${error.packageVersion}`]
+                            .filter(Boolean)
+                            .join(' ')}
+                        </p>
+                      )}
+                      <p className="text-status-error/70 mt-1">{error.message}</p>
+                      {error.blockedBeforeDispatch && (
+                        <p className="text-text-muted mt-2">
+                          No packaging pipeline was started and no changes were made in Intune.
+                        </p>
+                      )}
+                      {!error.retryable && (
+                        <p className="text-text-muted mt-1">
+                          Keep this app in the cart and try again after its trusted WinGet manifest is updated, or remove it to deploy the remaining apps.
+                        </p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -388,7 +526,7 @@ export function UploadCart() {
                     </AlertDialogContent>
                   </AlertDialog>
                   <Button
-                    onClick={isAuthenticated && !canDeploy && permissionStatus !== 'checking' ? handleFixPermissions : handleDeploy}
+                    onClick={isAuthenticated && !canDeploy && permissionStatus !== 'checking' ? handleFixPermissions : handleDeployClick}
                     disabled={isDeploying || (isAuthenticated && permissionStatus === 'checking')}
                     className={`flex-1 text-white border-0 disabled:opacity-50 ${
                       isAuthenticated && !canDeploy && permissionStatus !== 'checking'
@@ -399,7 +537,7 @@ export function UploadCart() {
                     {isDeploying ? (
                       <>
                         <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        Deploying...
+                        Verifying installers...
                       </>
                     ) : isAuthenticated && permissionStatus === 'checking' ? (
                       <>
@@ -431,6 +569,31 @@ export function UploadCart() {
               onClose={() => setEditingItem(null)}
             />
           )}
+
+          {/* Large deployment confirmation */}
+          <AlertDialog open={showLargeDeployConfirm} onOpenChange={setShowLargeDeployConfirm}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Deploy {items.length} apps to Intune?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  This will queue {items.length} packaging jobs and create {items.length} apps
+                  in your Intune tenant. Review your selection before continuing.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Review Selection</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-accent-cyan hover:bg-accent-cyan-dim"
+                  onClick={() => {
+                    setShowLargeDeployConfirm(false);
+                    handleDeploy();
+                  }}
+                >
+                  Deploy All
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       )}
     </>

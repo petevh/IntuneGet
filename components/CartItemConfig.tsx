@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   X,
   Settings,
@@ -22,6 +22,16 @@ import {
   Link2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
 import { AssignmentConfig } from '@/components/AssignmentConfig';
 import { CategoryConfig } from '@/components/CategoryConfig';
@@ -45,6 +55,7 @@ import type {
 import type { WingetScope } from '@/types/winget';
 import { useCartStore } from '@/stores/cart-store';
 import { generateRequirementRules } from '@/lib/requirement-rules';
+import { useFocusTrap } from '@/hooks/use-focus-trap';
 
 interface CartItemConfigProps {
   item: CartItem;
@@ -100,6 +111,37 @@ export function CartItemConfig({ item, onClose }: CartItemConfigProps) {
   // UI state
   const [expandedSection, setExpandedSection] = useState<ConfigSection | null>(isStore ? 'assignment' : 'behavior');
   const [isSaving, setIsSaving] = useState(false);
+
+  const modalRef = useFocusTrap<HTMLDivElement>();
+
+  // Unsaved-changes guard: compare current edits against the mount-time baseline
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  const configSnapshot = JSON.stringify({
+    storeInstallExperience, selectedScope, config, assignments, categories,
+    espProfiles, relationships, installCommand, uninstallCommand,
+  });
+  const baselineSnapshotRef = useRef(configSnapshot);
+  const requestClose = () => {
+    // While the discard dialog is open, Escape belongs to the dialog (Radix
+    // prevents default but the event still bubbles to the document listener).
+    if (showDiscardConfirm) return;
+    if (configSnapshot !== baselineSnapshotRef.current) {
+      setShowDiscardConfirm(true);
+    } else {
+      onClose();
+    }
+  };
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
+
+  // Escape key handler, matching the sibling PackageConfig modal
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') requestCloseRef.current();
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, []);
 
   const updateConfig = (updates: Partial<PSADTConfig>) => {
     setConfig((prev) => ({ ...prev, ...updates }));
@@ -178,10 +220,10 @@ export function CartItemConfig({ item, onClose }: CartItemConfigProps) {
   return (
     <div className="fixed inset-0 z-[60] overflow-hidden">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={requestClose} />
 
       {/* Modal */}
-      <div className="absolute right-0 top-0 bottom-0 w-full max-w-xl bg-bg-surface border-l border-overlay/10 shadow-2xl overflow-hidden flex flex-col">
+      <div ref={modalRef} className="absolute right-0 top-0 bottom-0 w-full max-w-xl bg-bg-surface border-l border-overlay/10 shadow-2xl overflow-hidden flex flex-col">
         {/* Header */}
         <div className="flex-shrink-0 bg-bg-surface/95 backdrop-blur-sm border-b border-overlay/10 px-6 py-4">
           <div className="flex items-start justify-between gap-4">
@@ -195,7 +237,7 @@ export function CartItemConfig({ item, onClose }: CartItemConfigProps) {
                 <p className="text-text-muted text-xs font-mono mt-1">{item.wingetId}</p>
               </div>
             </div>
-            <button onClick={onClose} className="text-text-muted hover:text-text-primary transition-colors">
+            <button onClick={requestClose} aria-label="Close configuration" className="text-text-muted hover:text-text-primary transition-colors">
               <X className="w-6 h-6" />
             </button>
           </div>
@@ -1255,7 +1297,7 @@ export function CartItemConfig({ item, onClose }: CartItemConfigProps) {
           <div className="flex gap-3">
             <Button
               variant="outline"
-              onClick={onClose}
+              onClick={requestClose}
               className="flex-1 border-overlay/15 text-text-secondary hover:bg-white/5 hover:border-overlay/20"
             >
               Cancel
@@ -1280,6 +1322,29 @@ export function CartItemConfig({ item, onClose }: CartItemConfigProps) {
           </div>
         </div>
       </div>
+
+      {/* Discard unsaved changes confirmation */}
+      <AlertDialog open={showDiscardConfirm} onOpenChange={setShowDiscardConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard configuration changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You have unsaved changes to this configuration. Closing now will discard them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep Editing</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShowDiscardConfirm(false);
+                onClose();
+              }}
+            >
+              Discard Changes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

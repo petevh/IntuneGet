@@ -1,6 +1,7 @@
 'use client';
 
 import { T } from 'gt-next';
+import { useRouter } from 'next/navigation';
 import { motion, useReducedMotion } from 'framer-motion';
 import { CheckCircle2, Loader2, XCircle, Ban, Clock } from 'lucide-react';
 import { RecentActivityItem } from '@/hooks/useAnalytics';
@@ -50,6 +51,7 @@ function ActivitySkeleton() {
 
 export function RecentActivityList({ activities, loading }: RecentActivityListProps) {
   const prefersReducedMotion = useReducedMotion();
+  const router = useRouter();
 
   if (loading) {
     return <ActivitySkeleton />;
@@ -60,6 +62,10 @@ export function RecentActivityList({ activities, loading }: RecentActivityListPr
       <InlineEmptyState
         icon={Clock}
         message={<T>No recent activity. Your deployment history will appear here.</T>}
+        action={{
+          label: <T>Browse App Catalog</T>,
+          onClick: () => router.push('/dashboard/apps'),
+        }}
       />
     );
   }

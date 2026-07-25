@@ -8,11 +8,19 @@ import * as crypto from 'crypto';
 import { spawn } from 'child_process';
 import { PackagerConfig } from './config.js';
 import { PackagingJob, JobPoller } from './job-poller.js';
-import { IntuneUploader, IntuneAppResult } from './intune-uploader.js';
+import { IntuneUploader, IntuneAppResult, DuplicateAppError } from './intune-uploader.js';
 import { createLogger, Logger } from './logger.js';
 
 interface PackagingResult {
   intunewinPath: string;
+  // Path to the inner AES-encrypted payload extracted from the .intunewin zip.
+  // This (not the outer .intunewin) is what must be uploaded to Azure Storage.
+  encryptedContentPath: string;
+  // Size of the original unencrypted content (from Detection.xml); Intune's
+  // mobileAppContentFile.size must be this value, not the encrypted size.
+  unencryptedContentSize: number;
+  // Size of the inner encrypted payload file (mobileAppContentFile.sizeEncrypted).
+  encryptedContentSize: number;
   encryptionInfo: {
     encryptionKey: string;
     macKey: string;
@@ -83,16 +91,42 @@ export class JobProcessor {
 
       // Step 7: Upload to Intune (70-95%)
       await poller.updateJobProgress(job.id, 75, 'Uploading to Intune...');
-      const intuneApp = await this.uploader.uploadToIntune(
-        job,
-        result.intunewinPath,
-        result.encryptionInfo,
-        async (percent, message) => {
-          // Map upload progress (0-100) to overall progress (75-95)
-          const overallPercent = 75 + Math.floor(percent * 0.2);
-          await poller.updateJobProgress(job.id, overallPercent, message);
+      let intuneApp;
+      try {
+        intuneApp = await this.uploader.uploadToIntune(
+          job,
+          result.encryptedContentPath,
+          result.encryptionInfo,
+          {
+            unencryptedSize: result.unencryptedContentSize,
+            encryptedSize: result.encryptedContentSize,
+          },
+          async (percent, message) => {
+            // Map upload progress (0-100) to overall progress (75-95)
+            const overallPercent = 75 + Math.floor(percent * 0.2);
+            await poller.updateJobProgress(job.id, overallPercent, message);
+          }
+        );
+      } catch (error) {
+        if (error instanceof DuplicateAppError) {
+          // Same app already deployed to this tenant via IntuneGet (by any
+          // user): finish as duplicate_skipped instead of failing the job.
+          await poller.updateJobStatus(job.id, 'duplicate_skipped', {
+            intune_app_id: error.duplicateInfo.existingAppId,
+            intune_app_url: error.duplicateInfo.existingAppUrl,
+            duplicate_info: error.duplicateInfo,
+            progress_percent: 100,
+            progress_message: 'Duplicate app already exists in Intune',
+          });
+          this.logger.info('Job skipped as duplicate', {
+            jobId: job.id,
+            existingAppId: error.duplicateInfo.existingAppId,
+            displayName: job.display_name,
+          });
+          return;
         }
-      );
+        throw error;
+      }
 
       // Step 8: Mark as deployed (100%)
       await poller.updateJobStatus(job.id, 'deployed', {
@@ -129,11 +163,25 @@ export class JobProcessor {
     const intuneWinUtil = path.join(toolsDir, 'IntuneWinAppUtil.exe');
     const psadtDir = path.join(toolsDir, 'PSAppDeployToolkit');
 
+    // A valid PSADT v4 template has Invoke-AppDeployToolkit.exe and the
+    // PSAppDeployToolkit module folder at its root. Packager versions before
+    // 1.2.0 extracted a v3-era layout (Toolkit/Deploy-Application.exe), so an
+    // existing folder is not enough - treat anything else as stale.
+    const isPsadtValid = () =>
+      fs.existsSync(path.join(psadtDir, 'Invoke-AppDeployToolkit.exe')) &&
+      fs.existsSync(path.join(psadtDir, 'PSAppDeployToolkit'));
+
+    if (fs.existsSync(psadtDir) && !isPsadtValid()) {
+      this.logger.warn('PSAppDeployToolkit folder has an outdated layout, re-downloading', {
+        psadtDir,
+      });
+      await fs.promises.rm(psadtDir, { recursive: true, force: true });
+    }
+
     // Check if tools exist
     const intuneWinExists = fs.existsSync(intuneWinUtil);
-    const psadtExists = fs.existsSync(psadtDir);
 
-    if (!intuneWinExists || !psadtExists) {
+    if (!intuneWinExists || !fs.existsSync(psadtDir)) {
       this.logger.info('Downloading required tools...');
 
       // Run the download script
@@ -150,6 +198,12 @@ export class JobProcessor {
     // Verify tools are now available
     if (!fs.existsSync(intuneWinUtil)) {
       throw new Error('IntuneWinAppUtil.exe not found after download');
+    }
+    if (!isPsadtValid()) {
+      throw new Error(
+        `PSAppDeployToolkit template is missing or incomplete at ${psadtDir}. ` +
+          'Delete the folder and run "intuneget-packager setup" to download it again.'
+      );
     }
 
     this.logger.debug('Tools verified', { toolsDir });
@@ -235,7 +289,15 @@ export class JobProcessor {
   private getInstallerFileName(job: PackagingJob): string {
     // Try to extract filename from URL
     const urlPath = new URL(job.installer_url).pathname;
-    const urlFileName = path.basename(urlPath);
+    let urlFileName = path.basename(urlPath);
+
+    // Store URL-encoded names decoded (Firefox%20Setup.exe -> Firefox Setup.exe),
+    // stripping any separators a decoded name could smuggle in
+    try {
+      urlFileName = path.basename(decodeURIComponent(urlFileName)).replace(/[\\/]/g, '');
+    } catch {
+      // Malformed escape sequence: keep the encoded name
+    }
 
     if (urlFileName && urlFileName.includes('.')) {
       return urlFileName;
@@ -296,9 +358,13 @@ export class JobProcessor {
 
     // Copy PSADT v4.1 toolkit files
     const psadtSource = path.join(this.config.paths.tools, 'PSAppDeployToolkit', 'PSAppDeployToolkit');
-    if (fs.existsSync(psadtSource)) {
-      await this.copyDirectory(psadtSource, toolkitDir);
+    if (!fs.existsSync(psadtSource)) {
+      throw new Error(
+        `PSAppDeployToolkit module not found at ${psadtSource}. ` +
+          'Run "intuneget-packager setup" to download the required tools.'
+      );
     }
+    await this.copyDirectory(psadtSource, toolkitDir);
 
     // Copy Config, Strings, and Assets directories for PSADT v4.1
     const configSource = path.join(this.config.paths.tools, 'PSAppDeployToolkit', 'Config');
@@ -320,9 +386,13 @@ export class JobProcessor {
       'PSAppDeployToolkit',
       'Invoke-AppDeployToolkit.exe'
     );
-    if (fs.existsSync(deployExeSource)) {
-      await fs.promises.copyFile(deployExeSource, path.join(packageDir, 'Invoke-AppDeployToolkit.exe'));
+    if (!fs.existsSync(deployExeSource)) {
+      throw new Error(
+        `Invoke-AppDeployToolkit.exe not found at ${deployExeSource}. ` +
+          'Run "intuneget-packager setup" to download the required tools.'
+      );
     }
+    await fs.promises.copyFile(deployExeSource, path.join(packageDir, 'Invoke-AppDeployToolkit.exe'));
 
     // Copy installer to Files directory
     const installerFileName = path.basename(installerPath);
@@ -760,7 +830,6 @@ ${steps}
     let markerPath = input.trim().replace(/\//g, '\\').replace(/\\+/g, '\\');
     markerPath = markerPath.replace(/^\\+|\\+$/g, '');
     markerPath = markerPath.replace(/^(HKLM|HKCU|HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER):?(\\|$)/i, '');
-    // eslint-disable-next-line no-control-regex
     markerPath = markerPath.replace(/[*?"'<>|\x00-\x1f]/g, '');
 
     const segments = markerPath
@@ -859,10 +928,19 @@ ${steps}
 
     const intuneWinUtil = path.join(this.config.paths.tools, 'IntuneWinAppUtil.exe');
 
-    // Run IntuneWinAppUtil.exe
-    await this.runProcess(intuneWinUtil, [
+    const setupFile = 'Invoke-AppDeployToolkit.exe';
+    if (!fs.existsSync(path.join(packageDir, setupFile))) {
+      throw new Error(
+        `${setupFile} is missing from the package folder. ` +
+          'Run "intuneget-packager setup" to repair the tools directory.'
+      );
+    }
+
+    // Run IntuneWinAppUtil.exe. It reports some failures on stdout while still
+    // exiting 0, so keep the output for diagnostics.
+    const toolOutput = await this.runProcess(intuneWinUtil, [
       '-c', packageDir,
-      '-s', 'Invoke-AppDeployToolkit.exe',
+      '-s', setupFile,
       '-o', outputDir,
       '-q', // Quiet mode
     ]);
@@ -872,36 +950,49 @@ ${steps}
     const intunewinFile = files.find(f => f.endsWith('.intunewin'));
 
     if (!intunewinFile) {
-      throw new Error('IntuneWinAppUtil did not generate .intunewin file');
+      const detail = toolOutput.trim().slice(-500);
+      throw new Error(
+        `IntuneWinAppUtil did not generate .intunewin file${detail ? `. Tool output: ${detail}` : ''}`
+      );
     }
 
     const intunewinPath = path.join(outputDir, intunewinFile);
 
-    // Extract encryption info from Detection.xml inside the intunewin
-    const encryptionInfo = await this.extractEncryptionInfo(intunewinPath);
-
-    return {
-      intunewinPath,
-      encryptionInfo,
-    };
+    // Extract encryption info AND the inner encrypted payload from the intunewin
+    return await this.extractPackageContents(intunewinPath, outputDir);
   }
 
   /**
-   * Extract encryption info from .intunewin file
+   * Extract encryption info and the inner encrypted content file from a
+   * .intunewin package.
+   *
+   * A .intunewin is a ZIP containing Metadata/Detection.xml (encryption keys,
+   * digest, the unencrypted content size, and the encrypted payload's file
+   * name) plus Contents/<encrypted-payload>. Intune expects the raw encrypted
+   * payload to be uploaded to Azure Storage - never the outer .intunewin zip -
+   * with size = UnencryptedContentSize and sizeEncrypted = the payload's size.
    */
-  private async extractEncryptionInfo(
-    intunewinPath: string
-  ): Promise<PackagingResult['encryptionInfo']> {
-    // The .intunewin file is a ZIP containing Detection.xml with encryption info
-    // Use PowerShell to extract and parse it
+  private async extractPackageContents(
+    intunewinPath: string,
+    outputDir: string
+  ): Promise<PackagingResult> {
+    const extractDir = path.join(outputDir, 'intunewin-extract');
+    const escapedIntunewin = intunewinPath.replace(/'/g, "''");
+    const escapedExtractDir = extractDir.replace(/'/g, "''");
+
     const script = `
       Add-Type -AssemblyName System.IO.Compression.FileSystem
-      $zip = [System.IO.Compression.ZipFile]::OpenRead('${intunewinPath.replace(/'/g, "''")}')
-      $entry = $zip.Entries | Where-Object { $_.Name -eq 'Detection.xml' }
-      $reader = New-Object System.IO.StreamReader($entry.Open())
-      $xml = [xml]$reader.ReadToEnd()
-      $reader.Close()
-      $zip.Dispose()
+      $extractDir = '${escapedExtractDir}'
+      if (Test-Path $extractDir) { Remove-Item $extractDir -Recurse -Force }
+      [System.IO.Compression.ZipFile]::ExtractToDirectory('${escapedIntunewin}', $extractDir)
+
+      $detection = Get-ChildItem $extractDir -Filter 'Detection.xml' -Recurse | Select-Object -First 1
+      if (-not $detection) { throw 'Detection.xml not found inside .intunewin package' }
+      [xml]$xml = Get-Content $detection.FullName
+
+      $encryptedFileName = $xml.ApplicationInfo.FileName
+      $encryptedFile = Get-ChildItem $extractDir -Filter $encryptedFileName -Recurse | Select-Object -First 1
+      if (-not $encryptedFile) { throw "Encrypted content file '$encryptedFileName' not found inside .intunewin package" }
 
       @{
         EncryptionKey = $xml.ApplicationInfo.EncryptionInfo.EncryptionKey
@@ -911,20 +1002,29 @@ ${steps}
         ProfileIdentifier = $xml.ApplicationInfo.EncryptionInfo.ProfileIdentifier
         FileDigest = $xml.ApplicationInfo.EncryptionInfo.FileDigest
         FileDigestAlgorithm = $xml.ApplicationInfo.EncryptionInfo.FileDigestAlgorithm
+        EncryptedContentPath = $encryptedFile.FullName
+        EncryptedContentSize = $encryptedFile.Length
+        UnencryptedContentSize = [long]$xml.ApplicationInfo.UnencryptedContentSize
       } | ConvertTo-Json
     `;
 
     const result = await this.runPowerShell(script);
-    const encryptionData = JSON.parse(result.trim());
+    const data = JSON.parse(result.trim());
 
     return {
-      encryptionKey: encryptionData.EncryptionKey,
-      macKey: encryptionData.MacKey,
-      initializationVector: encryptionData.InitializationVector,
-      mac: encryptionData.Mac,
-      profileIdentifier: encryptionData.ProfileIdentifier,
-      fileDigest: encryptionData.FileDigest,
-      fileDigestAlgorithm: encryptionData.FileDigestAlgorithm,
+      intunewinPath,
+      encryptedContentPath: data.EncryptedContentPath,
+      unencryptedContentSize: Number(data.UnencryptedContentSize),
+      encryptedContentSize: Number(data.EncryptedContentSize),
+      encryptionInfo: {
+        encryptionKey: data.EncryptionKey,
+        macKey: data.MacKey,
+        initializationVector: data.InitializationVector,
+        mac: data.Mac,
+        profileIdentifier: data.ProfileIdentifier || 'ProfileVersion1',
+        fileDigest: data.FileDigest,
+        fileDigestAlgorithm: data.FileDigestAlgorithm,
+      },
     };
   }
 
@@ -968,7 +1068,8 @@ ${steps}
         if (code === 0) {
           resolve(stdout);
         } else {
-          reject(new Error(`Process exited with code ${code}: ${stderr}`));
+          const detail = (stderr.trim() || stdout.trim()).slice(-500);
+          reject(new Error(`Process exited with code ${code}${detail ? `: ${detail}` : ''}`));
         }
       });
 

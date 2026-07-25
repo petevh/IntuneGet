@@ -1,0 +1,60 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    open-pull-requests-limit: 4
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:15"
+      timezone: Europe/Berlin
+    groups:
+      npm-production:
+        dependency-type: production
+        update-types: [minor, patch]
+        patterns: ["*"]
+      npm-development:
+        dependency-type: development
+        update-types: [minor, patch]
+        patterns: ["*"]
+    ignore:
+      # These major versions currently exceed the compatibility range of the
+      # Next.js ESLint toolchain. Keep receiving security, minor, and patch
+      # updates while major upgrades are evaluated explicitly.
+      - dependency-name: eslint
+        update-types: ["version-update:semver-major"]
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: npm
+    directory: /packager
+    open-pull-requests-limit: 2
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Berlin
+    groups:
+      packager-dependencies:
+        update-types: [minor, patch]
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    open-pull-requests-limit: 1
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:45"
+      timezone: Europe/Berlin

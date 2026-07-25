@@ -4,7 +4,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { getCatalogSource } from '@/lib/catalog';
 import { parseAccessToken } from '@/lib/auth-utils';
 import {
@@ -73,6 +73,26 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    if (!isSupabaseConfigured()) {
+      const unavailableError =
+        'Update deployment requires Supabase and is not available on this self-hosted deployment';
+      return NextResponse.json(
+        {
+          success: false,
+          triggered: 0,
+          failed: updateRequests.length,
+          results: updateRequests.map((req) => ({
+            winget_id: req.winget_id,
+            tenant_id: req.tenant_id,
+            success: false,
+            error: unavailableError,
+          })),
+          error: unavailableError,
+        },
+        { status: 503 }
+      );
+    }
+
     const supabase = createServerClient();
 
     // Get Supabase config for trigger
@@ -97,7 +117,6 @@ export async function POST(request: NextRequest) {
 
     // Read the user's global update settings once for the whole batch - they
     // do not change mid-request and per-item reads add up across 10 apps
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data: userSettingsRow, error: userSettingsError } = await (supabase as any)
       .from('user_settings')
       .select('settings')

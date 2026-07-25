@@ -102,7 +102,7 @@ const AlertDialogAction = React.forwardRef<
   <button
     ref={ref}
     className={cn(
-      'inline-flex h-10 items-center justify-center rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-text-primary transition-colors hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-bg-elevated disabled:cursor-not-allowed disabled:opacity-50',
+      'inline-flex h-10 items-center justify-center rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-text-primary transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-elevated disabled:cursor-not-allowed disabled:opacity-50',
       className
     )}
     {...props}
@@ -118,7 +118,7 @@ const AlertDialogCancel = React.forwardRef<
     <button
       ref={ref}
       className={cn(
-        'mt-2 inline-flex h-10 items-center justify-center rounded-md border border-overlay/10 bg-transparent px-4 py-2 text-sm font-semibold text-text-secondary transition-colors hover:bg-overlay/5 focus:outline-none focus:ring-2 focus:ring-accent-cyan focus:ring-offset-2 focus:ring-offset-bg-elevated disabled:cursor-not-allowed disabled:opacity-50 sm:mt-0',
+        'mt-2 inline-flex h-10 items-center justify-center rounded-md border border-overlay/10 bg-transparent px-4 py-2 text-sm font-semibold text-text-secondary transition-colors hover:bg-overlay/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-cyan focus-visible:ring-offset-2 focus-visible:ring-offset-bg-elevated disabled:cursor-not-allowed disabled:opacity-50 sm:mt-0',
         className
       )}
       {...props}

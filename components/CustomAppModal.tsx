@@ -4,8 +4,10 @@ import { useState, useEffect } from 'react';
 import { X, FilePlus2, Plus, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import { useCartStore } from '@/stores/cart-store';
+import { useFocusTrap } from '@/hooks/use-focus-trap';
 import {
   buildCustomAppCartItem,
   buildCustomWingetId,
@@ -29,8 +31,10 @@ const INSTALLER_TYPE_OPTIONS: { value: CustomInstallerType; label: string }[] = 
   { value: 'burn', label: 'Burn (WiX bundle)' },
 ];
 
+// Visual overrides on top of the shared Input base; also applied to the raw
+// select/textarea so all fields in this form match.
 const inputClassName =
-  'w-full px-3 py-2 bg-bg-elevated border border-overlay/15 rounded-lg text-text-primary text-sm placeholder:text-text-muted focus:outline-none focus:border-accent-cyan/40';
+  'flex h-auto w-full px-3 py-2 bg-bg-elevated border border-overlay/15 rounded-lg text-text-primary text-sm placeholder:text-text-muted shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-cyan';
 
 export function CustomAppModal({ onClose }: CustomAppModalProps) {
   // Required fields
@@ -41,10 +45,10 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
   const [installerType, setInstallerType] = useState<CustomInstallerType>('exe');
   const [architecture, setArchitecture] = useState<WingetArchitecture>('x64');
   const [installScope, setInstallScope] = useState<WingetScope>('machine');
+  const [sha256, setSha256] = useState('');
 
   // Optional fields
   const [silentSwitches, setSilentSwitches] = useState(CUSTOM_SILENT_SWITCH_DEFAULTS.exe);
-  const [sha256, setSha256] = useState('');
   const [uninstallCommand, setUninstallCommand] = useState('');
   const [description, setDescription] = useState('');
   const [iconUrl, setIconUrl] = useState('');
@@ -53,6 +57,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
   const [isAdding, setIsAdding] = useState(false);
 
   const addItem = useCartStore((state) => state.addItem);
+  const modalRef = useFocusTrap<HTMLDivElement>();
 
   // Escape key handler
   useEffect(() => {
@@ -163,7 +168,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
 
       {/* Modal */}
-      <div className="absolute right-0 top-0 bottom-0 w-full max-w-2xl bg-bg-surface border-l border-overlay/10 shadow-2xl overflow-hidden flex flex-col animate-slide-in-right">
+      <div ref={modalRef} className="absolute right-0 top-0 bottom-0 w-full max-w-2xl bg-bg-surface border-l border-overlay/10 shadow-2xl overflow-hidden flex flex-col animate-slide-in-right">
         {/* Header */}
         <div className="flex-shrink-0 bg-bg-surface/95 backdrop-blur-sm border-b border-overlay/10 px-6 py-4">
           <div className="flex items-start justify-between gap-4">
@@ -192,7 +197,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label htmlFor="custom-app-name" className="block text-sm font-medium text-text-muted mb-2">Display name</label>
-                <input
+                <Input
                   id="custom-app-name"
                   type="text"
                   value={displayName}
@@ -209,7 +214,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
               </div>
               <div>
                 <label htmlFor="custom-app-publisher" className="block text-sm font-medium text-text-muted mb-2">Publisher</label>
-                <input
+                <Input
                   id="custom-app-publisher"
                   type="text"
                   value={publisher}
@@ -229,7 +234,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
             {/* Version */}
             <div>
               <label htmlFor="custom-app-version" className="block text-sm font-medium text-text-muted mb-2">Version</label>
-              <input
+              <Input
                 id="custom-app-version"
                 type="text"
                 value={version}
@@ -248,7 +253,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
             {/* Installer URL */}
             <div>
               <label htmlFor="custom-app-installer-url" className="block text-sm font-medium text-text-muted mb-2">Installer URL</label>
-              <input
+              <Input
                 id="custom-app-installer-url"
                 type="url"
                 value={installerUrl}
@@ -264,6 +269,29 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
               )}
             </div>
 
+            {/* SHA256 */}
+            <div>
+              <label htmlFor="custom-app-sha256" className="block text-sm font-medium text-text-muted mb-2">SHA256 hash (optional)</label>
+              <Input
+                id="custom-app-sha256"
+                type="text"
+                value={sha256}
+                onChange={(e) => {
+                  setSha256(e.target.value);
+                  clearError('sha256');
+                }}
+                placeholder="Calculated automatically when empty"
+                className={cn(inputClassName, 'font-mono')}
+              />
+              <p className="text-xs text-text-muted mt-1">
+                Provide a trusted hash for strict verification. When empty, the packaging runner
+                calculates SHA256 from the downloaded installer and records it on the job.
+              </p>
+              {errors.sha256 && (
+                <p className="text-xs text-status-error mt-1">{errors.sha256}</p>
+              )}
+            </div>
+
             {/* Installer Type */}
             <div>
               <label htmlFor="custom-app-installer-type" className="block text-sm font-medium text-text-muted mb-2">Installer type</label>
@@ -271,7 +299,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
                 id="custom-app-installer-type"
                 value={installerType}
                 onChange={(e) => handleInstallerTypeChange(e.target.value as CustomInstallerType)}
-                className="w-full px-3 py-2 bg-bg-elevated border border-overlay/15 rounded-lg text-text-primary text-sm"
+                className={inputClassName}
               >
                 {INSTALLER_TYPE_OPTIONS.map((option) => (
                   <option key={option.value} value={option.value}>
@@ -332,7 +360,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
               {/* Silent Switches */}
               <div>
                 <label htmlFor="custom-app-silent-switches" className="block text-sm font-medium text-text-muted mb-2">Silent switches</label>
-                <input
+                <Input
                   id="custom-app-silent-switches"
                   type="text"
                   value={silentSwitches}
@@ -345,29 +373,10 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
                 </p>
               </div>
 
-              {/* SHA256 */}
-              <div>
-                <label htmlFor="custom-app-sha256" className="block text-sm font-medium text-text-muted mb-2">SHA256 hash</label>
-                <input
-                  id="custom-app-sha256"
-                  type="text"
-                  value={sha256}
-                  onChange={(e) => {
-                    setSha256(e.target.value);
-                    clearError('sha256');
-                  }}
-                  placeholder="Leave empty to skip verification"
-                  className={cn(inputClassName, 'font-mono')}
-                />
-                {errors.sha256 && (
-                  <p className="text-xs text-status-error mt-1">{errors.sha256}</p>
-                )}
-              </div>
-
               {/* Uninstall Command */}
               <div>
                 <label htmlFor="custom-app-uninstall" className="block text-sm font-medium text-text-muted mb-2">Uninstall command</label>
-                <input
+                <Input
                   id="custom-app-uninstall"
                   type="text"
                   value={uninstallCommand}
@@ -393,7 +402,7 @@ export function CustomAppModal({ onClose }: CustomAppModalProps) {
               {/* Icon URL */}
               <div>
                 <label htmlFor="custom-app-icon-url" className="block text-sm font-medium text-text-muted mb-2">Icon URL</label>
-                <input
+                <Input
                   id="custom-app-icon-url"
                   type="url"
                   value={iconUrl}

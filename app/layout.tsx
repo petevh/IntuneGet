@@ -2,14 +2,10 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
-import { MicrosoftAuthProvider } from "@/components/providers/MicrosoftAuthProvider";
-import { QueryProvider } from "@/components/providers/QueryProvider";
-import { ThemeProvider } from "@/components/providers/ThemeProvider";
-import { UserSettingsProvider } from "@/components/providers/UserSettingsProvider";
-import { MspProvider } from "@/contexts/MspContext";
+import { PublicThemeProvider } from "@/components/providers/theme-context";
 import { CookieConsentBanner } from '@/components/consent/CookieConsentBanner';
 import { PlausibleLoader } from '@/components/analytics/PlausibleLoader';
-import { GTProvider } from "gt-next";
+import { GTProvider, T } from "gt-next";
 import { getLocale } from "gt-next/server";
 
 // Analytics configuration
@@ -29,9 +25,9 @@ const jetbrainsMono = localFont({
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://intuneget.com"),
-  title: "IntuneGet | Free Intune App Deployment Tool - Deploy 10,000+ Winget Apps",
+  title: "IntuneGet | Free Intune App Deployment Tool - Deploy Winget Apps in Minutes",
   description:
-    "Deploy 10,000+ Winget apps to Microsoft Intune in minutes. Free, open-source tool. No scripting, no IntuneWin packaging. Trusted by IT teams worldwide.",
+    "Deploy any Winget app to Microsoft Intune in about 5 minutes. Free, open-source tool. No scripting, no IntuneWin packaging, no per-device licensing.",
   keywords: [
     "Intune app deployment",
     "Winget Intune",
@@ -56,24 +52,24 @@ export const metadata: Metadata = {
     type: "website",
     locale: "en_US",
     url: "https://intuneget.com",
-    title: "IntuneGet - Deploy 10,000+ Winget Apps to Intune for Free",
+    title: "IntuneGet - Deploy Winget Apps to Intune for Free",
     description:
-      "Deploy 10,000+ Winget apps to Microsoft Intune in minutes. Free, open-source tool with no scripting required.",
+      "Deploy any Winget app to Microsoft Intune in about 5 minutes. Free, open-source tool with no scripting required.",
     siteName: "IntuneGet",
     images: [
       {
         url: "/og-image.png",
         width: 1200,
         height: 630,
-        alt: "IntuneGet - Free Intune App Deployment Tool for 10,000+ Winget Apps",
+        alt: "IntuneGet - Free Intune App Deployment Tool for Winget Apps",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "IntuneGet - Deploy 10,000+ Winget Apps to Intune for Free",
+    title: "IntuneGet - Deploy Winget Apps to Intune for Free",
     description:
-      "Deploy 10,000+ Winget apps to Microsoft Intune in minutes. Free, open-source tool with no scripting required.",
+      "Deploy any Winget app to Microsoft Intune in about 5 minutes. Free, open-source tool with no scripting required.",
     images: ["/og-image.png"],
   },
   icons: {
@@ -102,6 +98,10 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f8fafc" },
+    { media: "(prefers-color-scheme: dark)", color: "#080f1d" },
+  ],
 };
 
 // Organization JSON-LD structured data
@@ -112,7 +112,7 @@ const organizationJsonLd = {
   url: "https://intuneget.com",
   logo: "https://intuneget.com/logo-512.png",
   description:
-    "IntuneGet is the leading free, open-source tool for deploying Winget applications to Microsoft Intune. Deploy 10,000+ apps in minutes with no scripting required.",
+    "IntuneGet is a free, open-source tool for deploying Winget applications to Microsoft Intune. Deploy any Winget app in about 5 minutes with no scripting required.",
   sameAs: ["https://github.com/ugurkocde/IntuneGet", "https://intunebrew.com"],
   founder: {
     "@type": "Person",
@@ -160,7 +160,7 @@ const websiteJsonLd = {
   name: "IntuneGet",
   url: "https://intuneget.com",
   description:
-    "Free, open-source Intune app deployment tool. Deploy 10,000+ Winget apps to Microsoft Intune in minutes.",
+    "Free, open-source Intune app deployment tool. Deploy any Winget app to Microsoft Intune in about 5 minutes.",
   publisher: {
     "@type": "Organization",
     name: "IntuneGet",
@@ -181,22 +181,24 @@ export default async function RootLayout({
   children: React.ReactNode;
 }>) {
   const locale = await getLocale();
+  // The heavy app providers (MSAL, react-query, user settings, MSP) live in
+  // app/(app)/layout.tsx so marketing/docs pages don't ship them. Public
+  // pages get the localStorage-backed PublicThemeProvider; the app group
+  // nests the settings-synced ThemeProvider inside it.
   const content = (
     <GTProvider>
-      <QueryProvider>
-        <MicrosoftAuthProvider>
-          <UserSettingsProvider>
-            <ThemeProvider>
-              <MspProvider>
-                {children}
-                <PlausibleLoader domain={PLAUSIBLE_DOMAIN} />
-                <CookieConsentBanner plausibleDomain={PLAUSIBLE_DOMAIN} />
-                <Toaster />
-              </MspProvider>
-            </ThemeProvider>
-          </UserSettingsProvider>
-        </MicrosoftAuthProvider>
-      </QueryProvider>
+      <PublicThemeProvider>
+        <a
+          href="#main-content"
+          className="sr-only focus:not-sr-only focus:fixed focus:top-4 focus:left-4 focus:z-[100] focus:rounded-lg focus:bg-bg-elevated focus:px-4 focus:py-2 focus:text-text-primary focus:shadow-soft-md"
+        >
+          <T id="a11y.skipToContent">Skip to content</T>
+        </a>
+        {children}
+        <PlausibleLoader domain={PLAUSIBLE_DOMAIN} />
+        <CookieConsentBanner plausibleDomain={PLAUSIBLE_DOMAIN} />
+        <Toaster />
+      </PublicThemeProvider>
     </GTProvider>
   );
 
@@ -204,7 +206,6 @@ export default async function RootLayout({
     <html lang={locale} suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://plausible.io" />
-        <link rel="dns-prefetch" href="https://api.github.com" />
         <script
           dangerouslySetInnerHTML={{
             __html: `window.__RUNTIME_CONFIG__=${JSON.stringify({
@@ -223,8 +224,9 @@ export default async function RootLayout({
       return;
     }
 
-  const prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
-    document.documentElement.classList.toggle("dark", prefersDark);
+    // First-time visitors always start in light mode. Explicit local or
+    // account preferences still take precedence on later visits.
+    document.documentElement.classList.remove("dark");
   } catch (error) {
     if (typeof console !== "undefined" && console.warn) {
       console.warn("Failed to initialize theme preference:", error);

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { StatusBadge, type StatusTone } from '@/components/ui/status-badge';
 import { useMicrosoftAuth } from '@/hooks/useMicrosoftAuth';
 import type { AuditAction, ResourceType } from '@/lib/audit-logger';
 
@@ -38,20 +39,20 @@ interface AuditLogFilters {
   end_date?: string;
 }
 
-const actionLabels: Record<string, { label: string; color: string }> = {
-  'tenant.created': { label: 'Tenant Created', color: 'text-green-500 bg-green-500/10' },
-  'tenant.removed': { label: 'Tenant Removed', color: 'text-red-500 bg-red-500/10' },
-  'tenant.consent_granted': { label: 'Consent Granted', color: 'text-green-500 bg-green-500/10' },
-  'tenant.consent_revoked': { label: 'Consent Revoked', color: 'text-orange-500 bg-orange-500/10' },
-  'deployment.started': { label: 'Deployment Started', color: 'text-blue-500 bg-blue-500/10' },
-  'deployment.completed': { label: 'Deployment Completed', color: 'text-green-500 bg-green-500/10' },
-  'deployment.failed': { label: 'Deployment Failed', color: 'text-red-500 bg-red-500/10' },
-  'member.invited': { label: 'Member Invited', color: 'text-purple-500 bg-purple-500/10' },
-  'member.joined': { label: 'Member Joined', color: 'text-green-500 bg-green-500/10' },
-  'member.removed': { label: 'Member Removed', color: 'text-red-500 bg-red-500/10' },
-  'member.role_changed': { label: 'Role Changed', color: 'text-yellow-500 bg-yellow-500/10' },
-  'organization.updated': { label: 'Org Updated', color: 'text-blue-500 bg-blue-500/10' },
-  'batch.deployment_started': { label: 'Batch Deploy Started', color: 'text-purple-500 bg-purple-500/10' },
+const actionLabels: Record<string, { label: string; tone: StatusTone }> = {
+  'tenant.created': { label: 'Tenant Created', tone: 'success' },
+  'tenant.removed': { label: 'Tenant Removed', tone: 'error' },
+  'tenant.consent_granted': { label: 'Consent Granted', tone: 'success' },
+  'tenant.consent_revoked': { label: 'Consent Revoked', tone: 'warning' },
+  'deployment.started': { label: 'Deployment Started', tone: 'info' },
+  'deployment.completed': { label: 'Deployment Completed', tone: 'success' },
+  'deployment.failed': { label: 'Deployment Failed', tone: 'error' },
+  'member.invited': { label: 'Member Invited', tone: 'violet' },
+  'member.joined': { label: 'Member Joined', tone: 'success' },
+  'member.removed': { label: 'Member Removed', tone: 'error' },
+  'member.role_changed': { label: 'Role Changed', tone: 'warning' },
+  'organization.updated': { label: 'Org Updated', tone: 'info' },
+  'batch.deployment_started': { label: 'Batch Deploy Started', tone: 'violet' },
 };
 
 const resourceIcons: Record<string, typeof User> = {
@@ -195,7 +196,7 @@ export function AuditLogTable() {
   };
 
   const getActionInfo = (action: string) => {
-    return actionLabels[action] || { label: action, color: 'text-text-muted bg-bg-surface0/10' };
+    return actionLabels[action] || { label: action, tone: 'neutral' as StatusTone };
   };
 
   const getResourceIcon = (resourceType: string | null) => {
@@ -227,7 +228,7 @@ export function AuditLogTable() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-accent-violet/10 flex items-center justify-center">
             <FileText className="w-5 h-5 text-accent-violet" />
@@ -245,6 +246,7 @@ export function AuditLogTable() {
             onClick={exportToCsv}
             disabled={isExporting || logs.length === 0}
             title="Export to CSV"
+            aria-label="Export audit logs to CSV"
           >
             {isExporting ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -256,11 +258,13 @@ export function AuditLogTable() {
             variant="outline"
             size="sm"
             onClick={() => setShowFilters(!showFilters)}
+            aria-label="Toggle filters"
+            aria-expanded={showFilters}
             className={cn(showFilters && 'bg-overlay/5')}
           >
             <Filter className="w-4 h-4" />
           </Button>
-          <Button variant="outline" size="sm" onClick={fetchLogs}>
+          <Button variant="outline" size="sm" onClick={fetchLogs} aria-label="Refresh audit logs">
             <RefreshCw className="w-4 h-4" />
           </Button>
         </div>
@@ -334,34 +338,31 @@ export function AuditLogTable() {
             return (
               <div
                 key={log.id}
-                className="flex items-center gap-4 p-4 bg-bg-elevated rounded-xl border border-overlay/10"
+                className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4 p-4 bg-bg-elevated rounded-xl border border-overlay/10"
               >
-                <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-overlay/5 flex items-center justify-center">
-                  <ResourceIcon className="w-5 h-5 text-text-muted" />
-                </div>
-
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span
-                      className={cn(
-                        'px-2 py-0.5 text-xs rounded-full font-medium',
-                        actionInfo.color
-                      )}
-                    >
-                      {actionInfo.label}
-                    </span>
-                    <span className="text-sm text-text-muted">
-                      by {log.user_email.split('@')[0]}
-                    </span>
+                <div className="flex items-center gap-4 flex-1 min-w-0">
+                  <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-overlay/5 flex items-center justify-center">
+                    <ResourceIcon className="w-5 h-5 text-text-muted" />
                   </div>
-                  {details && (
-                    <p className="text-sm text-text-secondary mt-1 truncate">
-                      {details}
-                    </p>
-                  )}
+
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <StatusBadge tone={actionInfo.tone} className="px-2 py-0.5 border-transparent">
+                        {actionInfo.label}
+                      </StatusBadge>
+                      <span className="text-sm text-text-muted">
+                        by {log.user_email.split('@')[0]}
+                      </span>
+                    </div>
+                    {details && (
+                      <p className="text-sm text-text-secondary mt-1 truncate">
+                        {details}
+                      </p>
+                    )}
+                  </div>
                 </div>
 
-                <div className="flex-shrink-0 text-right">
+                <div className="flex-shrink-0 pl-14 sm:pl-0 sm:text-right">
                   <p className="text-sm text-text-muted">{formatDate(log.created_at)}</p>
                 </div>
               </div>

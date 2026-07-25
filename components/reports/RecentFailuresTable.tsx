@@ -18,9 +18,9 @@ export function RecentFailuresTable({ data }: RecentFailuresTableProps) {
   if (!data || data.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-text-muted">
-        <div className="w-12 h-12 rounded-full bg-green-500/10 flex items-center justify-center mb-3">
+        <div className="w-12 h-12 rounded-full bg-status-success/10 flex items-center justify-center mb-3">
           <svg
-            className="w-6 h-6 text-green-500"
+            className="w-6 h-6 text-status-success"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"
@@ -56,7 +56,7 @@ export function RecentFailuresTable({ data }: RecentFailuresTableProps) {
 
   return (
     <div className="overflow-x-auto">
-      <table className="w-full">
+      <table className="w-full min-w-[560px]">
         <thead>
           <tr className="border-b border-overlay/15">
             <th className="text-left py-3 px-4 text-sm font-medium text-text-muted">
@@ -81,7 +81,7 @@ export function RecentFailuresTable({ data }: RecentFailuresTableProps) {
             >
               <td className="py-3 px-4">
                 <div className="flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  <AlertCircle className="w-4 h-4 text-status-error flex-shrink-0" />
                   <div>
                     <p className="text-text-primary text-sm font-medium">
                       {failure.displayName}
@@ -92,7 +92,7 @@ export function RecentFailuresTable({ data }: RecentFailuresTableProps) {
               </td>
               <td className="py-3 px-4">
                 <p
-                  className="text-red-400 text-sm"
+                  className="text-status-error text-sm"
                   title={failure.errorMessage}
                 >
                   {truncateError(failure.errorMessage)}
@@ -105,8 +105,8 @@ export function RecentFailuresTable({ data }: RecentFailuresTableProps) {
               </td>
               <td className="py-3 px-4 text-right">
                 <a
-                  href={`/dashboard/uploads?job=${failure.id}`}
-                  className="inline-flex items-center gap-1 text-blue-500 hover:text-blue-400 text-sm"
+                  href={`/dashboard/uploads?jobs=${failure.id}`}
+                  className="inline-flex items-center gap-1 text-accent-cyan hover:text-accent-cyan-bright text-sm"
                 >
                   View
                   <ExternalLink className="w-3 h-3" />

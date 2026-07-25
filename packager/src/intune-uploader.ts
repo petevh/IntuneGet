@@ -8,6 +8,14 @@ import { PackagerConfig } from './config.js';
 import { PackagingJob } from './job-poller.js';
 import { GraphClient } from './graph-client.js';
 import { createLogger, Logger } from './logger.js';
+import {
+  findDuplicateIntuneApp,
+  INTUNE_APP_SOURCE_MARKER,
+  type DuplicateAppInfo,
+} from './duplicate-app.js';
+
+export { INTUNE_APP_SOURCE_MARKER } from './duplicate-app.js';
+export type { DuplicateAppInfo } from './duplicate-app.js';
 
 export interface IntuneAppResult {
   id: string;
@@ -26,6 +34,31 @@ export interface EncryptionInfo {
 }
 
 type ProgressCallback = (percent: number, message: string) => Promise<void>;
+
+/**
+ * Thrown by uploadToIntune when the same app is already deployed to the tenant
+ * via IntuneGet (by any user) and the job does not carry forceCreate.
+ */
+export class DuplicateAppError extends Error {
+  readonly duplicateInfo: DuplicateAppInfo;
+
+  constructor(duplicateInfo: DuplicateAppInfo) {
+    super('Duplicate app already exists in Intune');
+    this.name = 'DuplicateAppError';
+    this.duplicateInfo = duplicateInfo;
+  }
+}
+
+/**
+ * Extract the forceCreate flag from the job's package_config (set by the web
+ * app's "Deploy as new app anyway" flow).
+ */
+export function extractForceCreate(packageConfig: unknown): boolean {
+  if (typeof packageConfig === 'object' && packageConfig !== null) {
+    return (packageConfig as Record<string, unknown>).forceCreate === true;
+  }
+  return false;
+}
 
 interface GraphMimeContent {
   '@odata.type': '#microsoft.graph.mimeContent';
@@ -151,11 +184,21 @@ export class IntuneUploader {
    */
   async uploadToIntune(
     job: PackagingJob,
-    intunewinPath: string,
+    encryptedContentPath: string,
     encryptionInfo: EncryptionInfo,
+    sizes: { unencryptedSize: number; encryptedSize: number },
     onProgress?: ProgressCallback
   ): Promise<IntuneAppResult> {
     const graphClient = new GraphClient(this.config, job.tenant_id);
+
+    // Step 0: Tenant-wide duplicate guard. Fail closed on Graph errors so an
+    // unavailable check cannot create an unintended second app.
+    if (!extractForceCreate(job.package_config)) {
+      const duplicate = await findDuplicateIntuneApp(graphClient, job);
+      if (duplicate) {
+        throw new DuplicateAppError(duplicate);
+      }
+    }
 
     // Step 1: Create Win32 LOB App (5%)
     await onProgress?.(5, 'Creating app in Intune...');
@@ -168,16 +211,18 @@ export class IntuneUploader {
     this.logger.info('Created content version', { contentVersionId: contentVersion.id });
 
     // Step 3: Create content file (15%)
+    // Intune's mobileAppContentFile.size is the unencrypted content size and
+    // sizeEncrypted is the encrypted payload size; the encrypted payload (not
+    // the outer .intunewin) is what gets uploaded to Azure Storage.
     await onProgress?.(15, 'Preparing file upload...');
-    const fileInfo = await fs.promises.stat(intunewinPath);
-    const encryptedSize = fileInfo.size;
 
     const contentFile = await this.createContentFile(
       graphClient,
       app.id,
       contentVersion.id,
-      path.basename(intunewinPath),
-      encryptedSize
+      path.basename(encryptedContentPath),
+      sizes.unencryptedSize,
+      sizes.encryptedSize
     );
     this.logger.info('Created content file', { contentFileId: contentFile.id });
 
@@ -194,7 +239,7 @@ export class IntuneUploader {
     // Step 5: Upload file chunks (25-80%)
     await onProgress?.(25, 'Uploading package...');
     await this.uploadFileChunks(
-      intunewinPath,
+      encryptedContentPath,
       uploadInfo.azureStorageUri,
       async (percent) => {
         // Map chunk upload progress (0-100) to overall (25-80)
@@ -291,10 +336,17 @@ export class IntuneUploader {
     job: PackagingJob
   ): Promise<{ id: string }> {
     const commands = this.buildCommandLines(job);
-    const description = extractPackageDescription(
+    const baseDescription = extractPackageDescription(
       job.package_config,
-      `${job.display_name} ${job.version} - Deployed via IntuneGet`
+      `${job.display_name} ${job.version} - Deployed via IntuneGet from Winget: ${job.winget_id}`
     );
+    // Append the source marker (same convention as the web app and hosted
+    // workflow) so tenant-wide duplicate detection recognizes this app
+    const description = baseDescription
+      .toLowerCase()
+      .includes(INTUNE_APP_SOURCE_MARKER.toLowerCase())
+      ? baseDescription
+      : `${baseDescription}\n${INTUNE_APP_SOURCE_MARKER}`;
     const largeIcon = await this.fetchLargeIcon(job);
     const appBody: Record<string, unknown> = {
       '@odata.type': '#microsoft.graph.win32LobApp',
@@ -417,7 +469,8 @@ export class IntuneUploader {
     appId: string,
     contentVersionId: string,
     fileName: string,
-    size: number
+    size: number,
+    sizeEncrypted: number
   ): Promise<{ id: string }> {
     const response = await graphClient.post<{ id: string }>(
       `/deviceAppManagement/mobileApps/${appId}/microsoft.graph.win32LobApp/contentVersions/${contentVersionId}/files`,
@@ -425,7 +478,7 @@ export class IntuneUploader {
         '@odata.type': '#microsoft.graph.mobileAppContentFile',
         name: fileName,
         size: size,
-        sizeEncrypted: size,
+        sizeEncrypted: sizeEncrypted,
         isDependency: false,
       }
     );

@@ -14,7 +14,7 @@ export function UpdateBadge() {
   }
 
   return (
-    <span className="ml-auto inline-flex items-center justify-center px-2 py-0.5 text-xs font-medium rounded-full bg-orange-500/10 text-orange-500">
+    <span className="ml-auto inline-flex items-center justify-center px-2 py-0.5 text-xs font-medium rounded-full bg-status-warning/10 text-status-warning">
       {data.count}
     </span>
   );

@@ -15,8 +15,9 @@ import {
 import { getAppConfig } from '@/lib/config';
 import { parseAccessToken } from '@/lib/auth-utils';
 import { getFeatureFlags } from '@/lib/features';
-import { isValidInstallerUrl } from '@/lib/custom-app';
+import { isValidInstallerUrl, isValidSha256 } from '@/lib/custom-app';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
+import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 import { checkStoredConsent } from '@/lib/msp/consent-cache';
 import { extractSilentSwitches } from '@/lib/msp/silent-switches';
 import { buildIntuneAppDescription } from '@/lib/intune-description';
@@ -26,12 +27,17 @@ import {
   STALE_JOB_TIMEOUT_MINUTES,
   INTERMEDIATE_STATES,
   STALE_JOB_ERROR_MESSAGE,
+  keepActuallyStaleJobs,
 } from '@/lib/stale-jobs';
 import type { PackagingJob } from '@/lib/db/types';
 import type { CartItem, Win32CartItem, StoreCartItem } from '@/types/upload';
 import { isStoreCartItem, isWin32CartItem } from '@/types/upload';
+import {
+  enforceInstallerPreflight,
+  InstallerPreflightError,
+} from '@/lib/installer-preflight';
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 interface PackageRequestBody {
   items: CartItem[];
@@ -67,47 +73,18 @@ export async function POST(request: NextRequest) {
     const userEmail = user.userEmail;
     const tokenTenantId = user.tenantId;
 
-    // Check for MSP tenant override header
+    // Check for MSP tenant override header and enforce tenant access checks
+    // (membership, managed tenant consent, and customer-only access mode)
     const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
-    let tenantId = tokenTenantId;
+    const { tenantId, errorResponse: tenantError } = await resolveTargetTenantId({
+      supabase: createServerClient(),
+      userId,
+      tokenTenantId,
+      requestedTenantId: mspTenantId,
+    });
 
-    // If MSP tenant ID is provided, validate that user has access to it
-    if (mspTenantId && mspTenantId !== tokenTenantId) {
-      const supabaseValidation = createServerClient();
-
-      // Check if user is a member of an MSP organization
-      const { data: membership } = await supabaseValidation
-        .from('msp_user_memberships')
-        .select('msp_organization_id')
-        .eq('user_id', userId)
-        .single();
-
-      if (!membership) {
-        return NextResponse.json(
-          { error: 'Not authorized to deploy to other tenants' },
-          { status: 403 }
-        );
-      }
-
-      // Check if the target tenant is managed by this MSP organization
-      const { data: managedTenant } = await supabaseValidation
-        .from('msp_managed_tenants')
-        .select('id')
-        .eq('msp_organization_id', membership.msp_organization_id)
-        .eq('tenant_id', mspTenantId)
-        .eq('consent_status', 'granted')
-        .eq('is_active', true)
-        .single();
-
-      if (!managedTenant) {
-        return NextResponse.json(
-          { error: 'Target tenant is not managed by your MSP organization or has not granted consent' },
-          { status: 403 }
-        );
-      }
-
-      // Use the MSP-specified tenant
-      tenantId = mspTenantId;
+    if (tenantError) {
+      return tenantError;
     }
 
     // Verify admin consent for the target tenant before accepting jobs
@@ -205,6 +182,66 @@ export async function POST(request: NextRequest) {
           },
           { status: 400 }
         );
+      }
+      const installerSha256 = item.installerSha256?.trim() || '';
+      if (installerSha256 && !isValidSha256(installerSha256)) {
+        return NextResponse.json(
+          {
+            error: `Invalid installer SHA256 for "${item.displayName || item.wingetId}": expected a 64-character hexadecimal value`,
+          },
+          { status: 400 }
+        );
+      }
+      // Catalog packages must retain their trusted manifest hash. Custom apps
+      // may omit it and have the packaging runner calculate it after download.
+      if (!installerSha256 && item.sourceType !== 'custom') {
+        return NextResponse.json(
+          {
+            error: `Missing installer SHA256 for "${item.displayName || item.wingetId}": catalog packages require a trusted manifest hash`,
+          },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Enforce installer health before creating job rows. Work in pairs to
+    // bound outbound bandwidth for a ten-app cart while keeping normal
+    // batches responsive.
+    for (let i = 0; i < win32Items.length; i += 2) {
+      const preflightResults = await Promise.allSettled(
+        win32Items.slice(i, i + 2).map((item) => enforceInstallerPreflight({
+          wingetId: item.wingetId,
+          version: item.version,
+          architecture: item.architecture,
+          installerUrl: item.installerUrl,
+          installerSha256: item.installerSha256,
+          installerType: item.installerType,
+          installScope: item.installScope,
+          sourceType: item.sourceType,
+        })),
+      );
+
+      const failedIndex = preflightResults.findIndex((result) => result.status === 'rejected');
+      if (failedIndex !== -1) {
+        const failed = preflightResults[failedIndex] as PromiseRejectedResult;
+        const failedItem = win32Items[i + failedIndex];
+        const error = failed.reason;
+        if (error instanceof InstallerPreflightError) {
+          return NextResponse.json({
+            error: 'Installer validation blocked this deployment',
+            message: error.message,
+            code: error.code,
+            retryable: error.retryable,
+            package: {
+              wingetId: failedItem.wingetId,
+              displayName: failedItem.displayName || failedItem.wingetId,
+              version: failedItem.version,
+            },
+            expectedSha256: failedItem.installerSha256?.toUpperCase(),
+            actualSha256: error.actualSha256,
+          }, { status: error.retryable ? 503 : 409 });
+        }
+        throw error;
       }
     }
 
@@ -358,6 +395,7 @@ export async function POST(request: NextRequest) {
         for (const item of win32Items) {
           try {
             const jobId = crypto.randomUUID();
+            const installerSha256 = item.installerSha256?.trim() || '';
 
             const jobRecord = await db.jobs.create({
               id: jobId,
@@ -371,7 +409,7 @@ export async function POST(request: NextRequest) {
               architecture: item.architecture,
               installer_type: item.installerType,
               installer_url: item.installerUrl,
-              installer_sha256: item.installerSha256,
+              installer_sha256: installerSha256,
               install_command: item.installCommand,
               uninstall_command: item.uninstallCommand,
               install_scope: item.installScope,
@@ -416,11 +454,13 @@ export async function POST(request: NextRequest) {
           }
         }
 
-        // Phase 2: Dispatch all GitHub Actions workflows in parallel
+        // Phase 2: Dispatch workflows. Upload execution is serialized per tenant
+        // by the workflow concurrency group, preventing Intune URI/SAS bursts.
         const isBatch = pendingDispatches.length > 1;
 
         const dispatchResults = await Promise.allSettled(
           pendingDispatches.map(async ({ item, jobId, createdAt }) => {
+            const installerSha256 = item.installerSha256?.trim() || '';
             const workflowInputs: WorkflowInputs = {
               jobId,
               tenantId,
@@ -434,7 +474,8 @@ export async function POST(request: NextRequest) {
               version: item.version,
               architecture: item.architecture,
               installerUrl: item.installerUrl,
-              installerSha256: item.installerSha256 || '',
+              installerSha256,
+              hashValidationMode: installerSha256 ? 'strict' : 'calculate',
               installerType: item.installerType,
               nestedInstallerType: item.nestedInstallerType,
               nestedInstallerPath: item.nestedInstallerPath,
@@ -456,6 +497,7 @@ export async function POST(request: NextRequest) {
                 : undefined,
               installScope: item.installScope,
               forceCreate: item.forceCreate || forceCreate,
+              sourceType: item.sourceType,
             };
 
             const triggerResult = await triggerPackagingWorkflow(
@@ -481,7 +523,8 @@ export async function POST(request: NextRequest) {
         );
 
         // Collect results from parallel dispatches
-        dispatchResults.forEach((result, idx) => {
+        for (let idx = 0; idx < dispatchResults.length; idx++) {
+          const result = dispatchResults[idx];
           if (result.status === 'fulfilled') {
             const { item, jobId, createdAt } = result.value;
             jobs.push({
@@ -498,12 +541,26 @@ export async function POST(request: NextRequest) {
             });
           } else {
             const dispatch = pendingDispatches[idx];
+            const dispatchError = result.reason instanceof Error ? result.reason.message : 'Unknown error';
+            if (dispatch) {
+              await db.jobs.update(dispatch.jobId, {
+                status: 'failed',
+                progress_percent: 0,
+                error_stage: 'authenticate',
+                error_category: 'network',
+                error_code: 'WORKFLOW_DISPATCH_FAILED',
+                error_message: dispatchError,
+                completed_at: new Date().toISOString(),
+              }).catch((updateError) => {
+                console.error(`Failed to mark dispatch ${dispatch.jobId} as failed:`, updateError);
+              });
+            }
             errors.push({
               wingetId: dispatch?.item.wingetId || 'unknown',
-              error: result.reason instanceof Error ? result.reason.message : 'Unknown error',
+              error: dispatchError,
             });
           }
-        });
+        }
       }
     }
 
@@ -547,13 +604,15 @@ async function healStaleJobs(
 ): Promise<PackagingJob[]> {
   const cutoff = Date.now() - STALE_JOB_TIMEOUT_MINUTES * 60 * 1000;
 
-  const staleJobs = jobs
+  const staleCandidates = jobs
     .filter((job) => {
       if (!INTERMEDIATE_STATES.includes(job.status)) return false;
       const lastActivity = job.updated_at || job.created_at;
       return new Date(lastActivity).getTime() < cutoff;
     })
     .slice(0, STALE_HEAL_BATCH_SIZE);
+
+  const staleJobs = await keepActuallyStaleJobs(staleCandidates);
 
   if (staleJobs.length === 0) {
     return jobs;
@@ -608,9 +667,19 @@ export async function GET(request: NextRequest) {
 
   try {
     if (jobId) {
+      const user = await parseAccessToken(request.headers.get('Authorization'));
+      if (!user) {
+        return NextResponse.json(
+          { error: 'Authentication required' },
+          { status: 401 }
+        );
+      }
+
       const job = await db.jobs.getById(jobId);
 
-      if (!job) {
+      // Return 404 (not 403) on a foreign job so job existence isn't leaked
+      // to a caller who doesn't own it.
+      if (!job || (job as { user_id?: string }).user_id !== user.userId) {
         return NextResponse.json(
           { error: 'Job not found' },
           { status: 404 }
@@ -629,6 +698,25 @@ export async function GET(request: NextRequest) {
         { error: 'Authentication required' },
         { status: 401 }
       );
+    }
+
+    // scope=tenant shows every user's deployments in the tenant (so a team on
+    // one tenant can see each other's IntuneGet apps and avoid duplicates).
+    const scope = searchParams.get('scope');
+    if (scope === 'tenant') {
+      const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
+      const { tenantId, errorResponse } = await resolveTargetTenantId({
+        supabase: createServerClient(),
+        userId: user.userId,
+        tokenTenantId: user.tenantId,
+        requestedTenantId: mspTenantId,
+      });
+      if (errorResponse) {
+        return errorResponse;
+      }
+
+      const tenantJobs = await db.jobs.getByTenantId(tenantId, 50);
+      return NextResponse.json({ jobs: tenantJobs, scope: 'tenant' });
     }
 
     const jobs = await db.jobs.getByUserId(user.userId, 50);

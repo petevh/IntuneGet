@@ -46,6 +46,8 @@ export function TenantSwitcher({ className }: TenantSwitcherProps) {
     <div ref={dropdownRef} className={cn('relative', className)}>
       <button
         onClick={() => setIsOpen(!isOpen)}
+        aria-haspopup="listbox"
+        aria-expanded={isOpen}
         className="flex items-center gap-2 px-3 py-2 rounded-lg bg-overlay/5 hover:bg-overlay/10 border border-overlay/10 transition-all duration-200"
       >
         <Building2 className="w-4 h-4 text-accent-cyan" />

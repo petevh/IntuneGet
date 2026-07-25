@@ -277,6 +277,7 @@ export interface Database {
           completed_at: string | null;
           cancelled_at: string | null;
           cancelled_by: string | null;
+          archived_at: string | null;
           is_auto_update: boolean;
           auto_update_policy_id: string | null;
         };
@@ -320,6 +321,7 @@ export interface Database {
           completed_at?: string | null;
           cancelled_at?: string | null;
           cancelled_by?: string | null;
+          archived_at?: string | null;
           is_auto_update?: boolean;
           auto_update_policy_id?: string | null;
         };
@@ -363,6 +365,7 @@ export interface Database {
           completed_at?: string | null;
           cancelled_at?: string | null;
           cancelled_by?: string | null;
+          archived_at?: string | null;
           is_auto_update?: boolean;
           auto_update_policy_id?: string | null;
         };
@@ -548,6 +551,7 @@ export interface Database {
           user_name: string | null;
           user_tenant_id: string | null;
           role: 'owner' | 'admin' | 'operator' | 'viewer';
+          access_mode: 'full' | 'customer_only';
           created_at: string;
           updated_at: string;
         };
@@ -559,6 +563,7 @@ export interface Database {
           user_name?: string | null;
           user_tenant_id?: string | null;
           role?: 'owner' | 'admin' | 'operator' | 'viewer';
+          access_mode?: 'full' | 'customer_only';
           created_at?: string;
           updated_at?: string;
         };
@@ -570,6 +575,7 @@ export interface Database {
           user_name?: string | null;
           user_tenant_id?: string | null;
           role?: 'owner' | 'admin' | 'operator' | 'viewer';
+          access_mode?: 'full' | 'customer_only';
           created_at?: string;
           updated_at?: string;
         };
@@ -943,11 +949,13 @@ export interface Database {
           payload: Record<string, unknown>;
           status: 'pending' | 'success' | 'failed';
           attempts: number;
+          max_attempts: number;
           response_status: number | null;
           response_body: string | null;
           error_message: string | null;
           created_at: string;
           delivered_at: string | null;
+          next_retry_at: string | null;
         };
         Insert: {
           id?: string;
@@ -956,11 +964,13 @@ export interface Database {
           payload: Record<string, unknown>;
           status?: 'pending' | 'success' | 'failed';
           attempts?: number;
+          max_attempts?: number;
           response_status?: number | null;
           response_body?: string | null;
           error_message?: string | null;
           created_at?: string;
           delivered_at?: string | null;
+          next_retry_at?: string | null;
         };
         Update: {
           id?: string;
@@ -969,11 +979,13 @@ export interface Database {
           payload?: Record<string, unknown>;
           status?: 'pending' | 'success' | 'failed';
           attempts?: number;
+          max_attempts?: number;
           response_status?: number | null;
           response_body?: string | null;
           error_message?: string | null;
           created_at?: string;
           delivered_at?: string | null;
+          next_retry_at?: string | null;
         };
         Relationships: GenericRelationship[];
       };
@@ -1391,6 +1403,7 @@ export interface Database {
           organization_id: string;
           email: string;
           role: 'owner' | 'admin' | 'operator' | 'viewer';
+          access_mode: 'full' | 'customer_only';
           invited_by_user_id: string;
           invited_by_email: string | null;
           token: string;
@@ -1403,6 +1416,7 @@ export interface Database {
           organization_id: string;
           email: string;
           role: 'owner' | 'admin' | 'operator' | 'viewer';
+          access_mode?: 'full' | 'customer_only';
           invited_by_user_id: string;
           invited_by_email?: string | null;
           token: string;
@@ -1415,6 +1429,7 @@ export interface Database {
           organization_id?: string;
           email?: string;
           role?: 'owner' | 'admin' | 'operator' | 'viewer';
+          access_mode?: 'full' | 'customer_only';
           invited_by_user_id?: string;
           invited_by_email?: string | null;
           token?: string;
@@ -1550,6 +1565,7 @@ export interface Database {
           sccm_install_command: string | null;
           sccm_uninstall_command: string | null;
           sccm_install_behavior: string | null;
+          sccm_admin_categories: string[] | null;
           match_status: string;
           match_confidence: number | null;
           matched_winget_id: string | null;
@@ -1586,6 +1602,7 @@ export interface Database {
           sccm_install_command?: string | null;
           sccm_uninstall_command?: string | null;
           sccm_install_behavior?: string | null;
+          sccm_admin_categories?: string[] | null;
           match_status?: string;
           match_confidence?: number | null;
           matched_winget_id?: string | null;
@@ -1622,6 +1639,7 @@ export interface Database {
           sccm_install_command?: string | null;
           sccm_uninstall_command?: string | null;
           sccm_install_behavior?: string | null;
+          sccm_admin_categories?: string[] | null;
           match_status?: string;
           match_confidence?: number | null;
           matched_winget_id?: string | null;

@@ -15,6 +15,7 @@ const {
   triggerPackagingWorkflowMock,
   getAppConfigMock,
   getFeatureFlagsMock,
+  enforceInstallerPreflightMock,
 } = vi.hoisted(() => ({
   getDatabaseMock: vi.fn(),
   getByUserIdMock: vi.fn(),
@@ -28,6 +29,7 @@ const {
   triggerPackagingWorkflowMock: vi.fn(),
   getAppConfigMock: vi.fn(),
   getFeatureFlagsMock: vi.fn(),
+  enforceInstallerPreflightMock: vi.fn(),
 }));
 
 vi.mock('@/lib/db', () => ({
@@ -59,8 +61,23 @@ vi.mock('@/lib/features', () => ({
   getFeatureFlags: getFeatureFlagsMock,
 }));
 
+vi.mock('@/lib/installer-preflight', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@/lib/installer-preflight')>();
+  return {
+    ...original,
+    enforceInstallerPreflight: enforceInstallerPreflightMock,
+  };
+});
+
 vi.mock('@/lib/supabase', () => ({
   createServerClient: vi.fn(),
+}));
+
+vi.mock('@/lib/msp/tenant-resolution', () => ({
+  resolveTargetTenantId: vi.fn(async ({ tokenTenantId }: { tokenTenantId: string }) => ({
+    tenantId: tokenTenantId,
+    errorResponse: null,
+  })),
 }));
 
 vi.mock('@/lib/graph-token', () => ({
@@ -72,6 +89,7 @@ vi.mock('@/lib/store-app-deploy', () => ({
 }));
 
 import { GET, POST } from '@/app/api/package/route';
+import { InstallerPreflightError } from '@/lib/installer-preflight';
 
 function makeJob(overrides: Partial<PackagingJob>): PackagingJob {
   const now = new Date().toISOString();
@@ -230,7 +248,7 @@ describe('POST /api/package (workflow dispatch)', () => {
       architecture: 'x64',
       installerType: 'exe',
       installerUrl: 'https://example.com/setup.exe',
-      installerSha256: 'abc123',
+      installerSha256: 'a'.repeat(64),
       installCommand: 'setup.exe /S',
       uninstallCommand: 'uninstall.exe /S',
       installScope: 'machine',
@@ -263,6 +281,11 @@ describe('POST /api/package (workflow dispatch)', () => {
     isGitHubActionsConfiguredMock.mockReturnValue(true);
     getAppConfigMock.mockReturnValue({ app: { url: 'http://localhost:3000' } });
     triggerPackagingWorkflowMock.mockResolvedValue({ success: true });
+    enforceInstallerPreflightMock.mockResolvedValue({
+      cacheKey: 'healthy-key',
+      status: 'healthy',
+      source: 'cache',
+    });
   });
 
   it('forwards item relationships into the workflow inputs', async () => {
@@ -306,5 +329,140 @@ describe('POST /api/package (workflow dispatch)', () => {
     expect(response.status).toBe(200);
     expect(triggerPackagingWorkflowMock).toHaveBeenCalledTimes(1);
     expect(triggerPackagingWorkflowMock.mock.calls[0][0].relationships).toBeUndefined();
+  });
+
+  it('calculates the hash in the workflow for a custom app without a supplied SHA256', async () => {
+    const request = new NextRequest('http://localhost:3000/api/package', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        items: [makeWin32Item({ sourceType: 'custom', installerSha256: '' })],
+      }),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(200);
+    expect(triggerPackagingWorkflowMock).toHaveBeenCalledTimes(1);
+    expect(triggerPackagingWorkflowMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        installerSha256: '',
+        hashValidationMode: 'calculate',
+      })
+    );
+  });
+
+  it('treats a whitespace-only custom-app SHA256 as missing', async () => {
+    const request = new NextRequest('http://localhost:3000/api/package', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        items: [makeWin32Item({ sourceType: 'custom', installerSha256: '   ' })],
+      }),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(200);
+    expect(triggerPackagingWorkflowMock.mock.calls[0][0]).toEqual(
+      expect.objectContaining({
+        installerSha256: '',
+        hashValidationMode: 'calculate',
+      })
+    );
+  });
+
+  it('keeps strict hash validation when a trusted SHA256 is supplied', async () => {
+    const request = new NextRequest('http://localhost:3000/api/package', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items: [makeWin32Item()] }),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(200);
+    expect(triggerPackagingWorkflowMock.mock.calls[0][0].hashValidationMode).toBe('strict');
+  });
+
+  it('rejects a catalog package without its trusted manifest SHA256', async () => {
+    const request = new NextRequest('http://localhost:3000/api/package', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items: [makeWin32Item({ installerSha256: '' })] }),
+    });
+
+    const response = await POST(request);
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toMatch(/catalog packages require a trusted manifest hash/i);
+    expect(triggerPackagingWorkflowMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid custom-app SHA256 instead of calculating over malformed input', async () => {
+    const request = new NextRequest('http://localhost:3000/api/package', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        items: [makeWin32Item({ sourceType: 'custom', installerSha256: 'not-a-hash' })],
+      }),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(400);
+    expect(triggerPackagingWorkflowMock).not.toHaveBeenCalled();
+  });
+
+  it('blocks a quarantined installer before creating a job or dispatching an Action', async () => {
+    enforceInstallerPreflightMock.mockRejectedValueOnce(new InstallerPreflightError(
+      'HASH_MISMATCH',
+      'The publisher currently serves different bytes.',
+      false,
+      'b'.repeat(64),
+    ));
+
+    const request = new NextRequest('http://localhost:3000/api/package', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items: [makeWin32Item()] }),
+    });
+
+    const response = await POST(request);
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body).toEqual(expect.objectContaining({
+      code: 'HASH_MISMATCH',
+      retryable: false,
+      package: {
+        wingetId: 'Test.App',
+        displayName: 'Test App',
+        version: '1.0.0',
+      },
+      expectedSha256: 'A'.repeat(64),
+      actualSha256: 'b'.repeat(64),
+    }));
+    expect(createMock).not.toHaveBeenCalled();
+    expect(triggerPackagingWorkflowMock).not.toHaveBeenCalled();
   });
 });

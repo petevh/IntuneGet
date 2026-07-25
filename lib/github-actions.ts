@@ -5,6 +5,7 @@
  */
 
 import { applyInstallerUrlOverride } from './installer-url-overrides';
+import { enforceInstallerPreflight } from './installer-preflight';
 
 export interface WorkflowInputs {
   jobId: string;
@@ -17,6 +18,7 @@ export interface WorkflowInputs {
   architecture?: string;
   installerUrl: string;
   installerSha256: string;
+  hashValidationMode?: 'strict' | 'calculate';
   installerType: string;
   nestedInstallerType?: string; // Nested installer type for zip installers
   nestedInstallerPath?: string; // Relative path to the nested installer inside the zip
@@ -37,6 +39,7 @@ export interface WorkflowInputs {
   removeAssignmentsFromPreviousApp?: boolean; // Remove assignments from previous app after carry-over
   autoSupersede?: boolean; // Mark the new app as superseding the previous app
   supersedenceType?: string; // Supersedence type for auto-supersede ('update' | 'replace')
+  sourceType?: 'winget' | 'custom'; // Custom installers are outside winget-pkgs trust validation
 }
 
 export interface GitHubActionsConfig {
@@ -110,6 +113,19 @@ export async function triggerPackagingWorkflow(
     inputs.installerUrl,
   );
 
+  // This is the final dispatch boundary shared by manual, MSP, update-policy,
+  // and auto-update paths. Never create a packaging run for a known-bad tuple.
+  await enforceInstallerPreflight({
+    wingetId: inputs.wingetId,
+    version: inputs.version,
+    architecture: inputs.architecture,
+    installerUrl: finalInstallerUrl,
+    installerSha256: inputs.installerSha256,
+    installerType: inputs.installerType,
+    installScope: inputs.installScope,
+    sourceType: inputs.sourceType,
+  });
+
   // Record time before triggering to help find the run
   const triggerTime = new Date();
 
@@ -145,6 +161,7 @@ export async function triggerPackagingWorkflow(
         installer: {
           url: finalInstallerUrl,
           sha256: inputs.installerSha256,
+          hashValidationMode: inputs.hashValidationMode || 'strict',
           type: inputs.installerType,
           nestedInstallerType: inputs.nestedInstallerType || '',
           nestedInstallerPath: inputs.nestedInstallerPath || '',

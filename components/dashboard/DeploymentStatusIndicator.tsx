@@ -16,6 +16,7 @@ export function DeploymentStatusIndicator() {
       href="/dashboard/uploads?status=pending"
       className="relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm text-text-secondary hover:text-text-primary hover:bg-overlay/5 transition-all"
       title={`${pendingCount} active deployment${pendingCount !== 1 ? 's' : ''}`}
+      aria-label={`${pendingCount} active deployment${pendingCount !== 1 ? 's' : ''}, view pending uploads`}
     >
       <Rocket className="w-4 h-4" />
       <span className="text-xs font-medium tabular-nums">{pendingCount}</span>

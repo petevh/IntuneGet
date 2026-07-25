@@ -36,7 +36,6 @@ interface MembershipWithOrganization extends MspUserMembershipRow {
  * Type-safe table accessor for Supabase operations
  * Casts to any to work around Supabase client overload conflicts
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getTable(supabase: SupabaseClient<Database>, table: string): any {
   return supabase.from(table as keyof Database['public']['Tables']);
 }
@@ -80,6 +79,7 @@ export async function GET(request: NextRequest) {
         organization: null,
         stats: null,
         isMspUser: false,
+        current_user: null,
       };
       return NextResponse.json(response);
     }
@@ -103,6 +103,10 @@ export async function GET(request: NextRequest) {
       organization,
       stats: stats as MspOrganizationStats | null,
       isMspUser: true,
+      current_user: {
+        role: membership.role,
+        access_mode: membership.access_mode || 'full',
+      },
     };
 
     return NextResponse.json(response);

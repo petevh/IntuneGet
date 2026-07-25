@@ -28,6 +28,16 @@ import {
   Link2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { cn } from '@/lib/utils';
 import { AppIcon } from '@/components/AppIcon';
 import { AssignmentConfig } from '@/components/AssignmentConfig';
@@ -53,6 +63,7 @@ import type { EspProfileSelection } from '@/types/esp';
 import { DEFAULT_PSADT_CONFIG, getDefaultProcessesToClose } from '@/types/psadt';
 import { useCartStore, createStoreCartItem } from '@/stores/cart-store';
 import { useUpdateAppSettings } from '@/hooks/use-update-app-settings';
+import { useFocusTrap } from '@/hooks/use-focus-trap';
 import { generateDetectionRules, generateInstallCommand, generateUninstallCommand, resolveSilentArgs } from '@/lib/detection-rules';
 import { extractSilentSwitches } from '@/lib/msp/silent-switches';
 import { INTUNE_APP_SOURCE_MARKER } from '@/lib/intune-description';
@@ -276,14 +287,49 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
       ? isInCart(effectiveWingetId, selectedVersion, selectedInstaller.architecture, selectedScope)
       : false;
 
+  const modalRef = useFocusTrap<HTMLDivElement>();
+
+  // Unsaved-changes guard. The baseline snapshot is captured lazily on the
+  // user's first interaction inside the modal, so programmatic settling on
+  // mount (scope auto-sync, locale variant resolution) never counts as dirty.
+  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
+  const configSnapshot = JSON.stringify({
+    storeInstallExperience, selectedVersion, selectedArch, selectedScope,
+    selectedLocale, config, description, assignments, categories,
+    espProfiles, relationships,
+  });
+  const latestSnapshotRef = useRef(configSnapshot);
+  latestSnapshotRef.current = configSnapshot;
+  const baselineSnapshotRef = useRef<string | null>(null);
+  const captureBaseline = () => {
+    if (baselineSnapshotRef.current === null) {
+      baselineSnapshotRef.current = latestSnapshotRef.current;
+    }
+  };
+  const requestClose = () => {
+    // While the discard dialog is open, Escape belongs to the dialog (Radix
+    // prevents default but the event still bubbles to the document listener).
+    if (showDiscardConfirm) return;
+    const isDirty =
+      baselineSnapshotRef.current !== null &&
+      baselineSnapshotRef.current !== latestSnapshotRef.current;
+    if (isDirty) {
+      setShowDiscardConfirm(true);
+    } else {
+      onClose();
+    }
+  };
+  const requestCloseRef = useRef(requestClose);
+  requestCloseRef.current = requestClose;
+
   // Escape key handler
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') requestCloseRef.current();
     };
     document.addEventListener('keydown', handleEscape);
     return () => document.removeEventListener('keydown', handleEscape);
-  }, [onClose]);
+  }, []);
 
   // Auto-select scope based on manifest's Scope field when installer changes
   // Skip the initial mount when pre-filled from deployed config (user's previous choice takes priority)
@@ -326,7 +372,6 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
         detectionRules: rules,
       }));
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedInstaller, pkg.name, effectiveWingetId, selectedVersion, config.registryMarkerPath]);
 
   const handleAddToCart = async () => {
@@ -497,10 +542,15 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
   return (
     <div className="fixed inset-0 z-50 overflow-hidden" role="dialog" aria-modal="true" aria-labelledby="package-config-title">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={requestClose} aria-hidden="true" />
 
       {/* Modal */}
-      <div className="absolute right-0 top-0 bottom-0 w-full max-w-2xl bg-bg-surface border-l border-overlay/10 shadow-2xl overflow-hidden flex flex-col">
+      <div
+        ref={modalRef}
+        className="absolute right-0 top-0 bottom-0 w-full max-w-2xl bg-bg-surface border-l border-overlay/10 shadow-2xl overflow-hidden flex flex-col"
+        onPointerDownCapture={captureBaseline}
+        onKeyDownCapture={captureBaseline}
+      >
         {/* Header */}
         <div className="flex-shrink-0 bg-bg-surface/95 backdrop-blur-sm border-b border-overlay/10 px-6 py-4">
           <div className="flex items-start justify-between gap-4">
@@ -518,7 +568,7 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
                 <p className="text-text-muted text-xs font-mono mt-1">{pkg.id}</p>
               </div>
             </div>
-            <button onClick={onClose} aria-label="Close configuration" className="text-text-muted hover:text-text-primary transition-colors">
+            <button onClick={requestClose} aria-label="Close configuration" className="text-text-muted hover:text-text-primary transition-colors">
               <X className="w-6 h-6" />
             </button>
           </div>
@@ -2073,6 +2123,29 @@ export function PackageConfig({ package: pkg, installers, versions = [], onClose
           )}
         </div>
       </div>
+
+      {/* Discard unsaved changes confirmation */}
+      <AlertDialog open={showDiscardConfirm} onOpenChange={setShowDiscardConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard configuration changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You have unsaved changes to this package configuration. Closing now will discard them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep Editing</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setShowDiscardConfirm(false);
+                onClose();
+              }}
+            >
+              Discard Changes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

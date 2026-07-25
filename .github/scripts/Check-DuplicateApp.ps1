@@ -7,7 +7,8 @@
     and wingetId. If a duplicate is found, sends a duplicate_skipped callback and sets
     DUPLICATE_FOUND=true in the environment. If forceCreate is enabled, skips the check.
 
-    This script is non-fatal: API errors are logged as warnings and deployment proceeds.
+    API errors stop the deployment before app creation so a transient duplicate
+    check failure cannot create a second app.
 
 .NOTES
     Env vars consumed:
@@ -54,7 +55,9 @@ try {
 
     # Query Win32 apps from Graph API
     $filter = "isof('microsoft.graph.win32LobApp')"
-    $select = "id,displayName,description,displayVersion,createdDateTime"
+    # Keep the collection projection limited to mobileApp base properties.
+    # Graph rejects Win32-only fields in $select against this base collection.
+    $select = "id,displayName,description"
     $baseUrl = "https://graph.microsoft.com/v1.0/deviceAppManagement/mobileApps"
     $url = "${baseUrl}?`$filter=${filter}&`$select=${select}"
 
@@ -71,8 +74,7 @@ try {
 
     Write-Host "Found $($allApps.Count) Win32 app(s) in tenant"
 
-    # Filter for exact displayName match (case-insensitive)
-    $nameMatches = $allApps | Where-Object { $_.displayName -ieq $displayName }
+    $nameMatches = @($allApps | Where-Object { $_.displayName -ieq $displayName })
 
     if ($nameMatches.Count -eq 0) {
         Write-Host "No apps found with name '$displayName' - proceeding with deployment"
@@ -82,13 +84,39 @@ try {
 
     Write-Host "Found $($nameMatches.Count) app(s) matching name '$displayName'"
 
-    # Check for exact match: name + IntuneGet fingerprint in description
+    # Check for exact match: name + IntuneGet fingerprint in description.
+    # Apps deployed with a default description carry "Winget: <id>"; apps
+    # deployed with a catalog description carry only "Source: IntuneGet.com".
+    # A marker naming a DIFFERENT winget id is a different app, not a duplicate.
     $exactMatch = $null
     foreach ($app in $nameMatches) {
-        if ($app.description -and $app.description -match "Winget:\s*$([regex]::Escape($wingetId))") {
-            $exactMatch = $app
-            break
+        if (-not $app.description) { continue }
+        $isFingerprintMatch = $false
+        if ($app.description -match "Winget:\s*(\S+)") {
+            if ($wingetId -and $Matches[1] -ieq $wingetId) {
+                $isFingerprintMatch = $true
+            }
+        } elseif ($app.description -match [regex]::Escape("Source: IntuneGet.com")) {
+            $isFingerprintMatch = $true
         }
+
+        if (-not $isFingerprintMatch) { continue }
+
+        # Fetch the polymorphic resource without $select before reading
+        # Win32-only properties such as displayVersion and committedContentVersion.
+        $detailUrl = "$baseUrl/$($app.id)"
+        $appDetails = Invoke-RestMethod -Uri $detailUrl -Headers $headers -Method Get -ErrorAction Stop
+
+        # Only committed, published apps are deployable duplicates. Failed or
+        # partially-created apps from an earlier upload must not block a safe retry.
+        if ($appDetails.publishingState -ne 'published' -or
+            [string]::IsNullOrWhiteSpace([string]$appDetails.committedContentVersion)) {
+            Write-Host "Ignoring incomplete matching app $($app.id) (state: $($appDetails.publishingState))"
+            continue
+        }
+
+        $exactMatch = $appDetails
+        break
     }
 
     if ($exactMatch) {
@@ -134,9 +162,22 @@ try {
     }
 }
 catch {
-    # Non-fatal: log warning and proceed with deployment
-    Write-Host "::warning::Duplicate check failed: $($_.Exception.Message)"
-    Write-Host "Proceeding with deployment (duplicate check is non-blocking)"
-    echo "DUPLICATE_FOUND=false" >> $env:GITHUB_ENV
-    exit 0
+    $errorMessage = $_.Exception.Message
+    Write-Host "::error::Duplicate check failed: $errorMessage"
+    Send-Callback -Body @{
+        jobId = $env:JOB_ID
+        status = "failed"
+        message = "Could not verify whether this app already exists in Intune. Retry when Microsoft Graph is available."
+        progress = 0
+        errorStage = "upload"
+        errorCategory = "intune_api"
+        errorCode = "DUPLICATE_CHECK_FAILED"
+        errorDetails = @{ operation = "duplicate_check"; error = $errorMessage }
+        retryable = $true
+        runId = "$env:GITHUB_RUN_ID"
+        runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+    } -CallbackUrl $env:CALLBACK_URL -CallbackSecret $env:CALLBACK_SECRET -MaxRetries 5 | Out-Null
+    $env:ERROR_SENT = "true"
+    echo "ERROR_SENT=true" >> $env:GITHUB_ENV
+    throw
 }

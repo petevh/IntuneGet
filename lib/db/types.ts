@@ -55,6 +55,7 @@ export interface PackagingJob {
   completed_at: string | null;
   cancelled_at: string | null;
   cancelled_by: string | null;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -111,6 +112,11 @@ export interface DatabaseAdapter {
     getByUserId(userId: string, limit?: number): Promise<PackagingJob[]>;
 
     /**
+     * Get jobs for every user in a tenant (tenant-wide deployments view)
+     */
+    getByTenantId(tenantId: string, limit?: number): Promise<PackagingJob[]>;
+
+    /**
      * Create a new job
      */
     create(job: Partial<PackagingJob>): Promise<PackagingJob>;
@@ -149,13 +155,13 @@ export interface DatabaseAdapter {
     getStats(): Promise<JobStats>;
 
     /**
-     * Delete a single job by ID
+     * Soft-archive a single job by ID
      */
     deleteById(id: string): Promise<boolean>;
 
     /**
-     * Bulk-delete jobs matching a user ID and a set of statuses
-     * Returns the number of deleted rows
+     * Bulk-archive jobs matching a user ID and a set of statuses
+     * Returns the number of archived rows
      */
     deleteByUserIdAndStatuses(userId: string, statuses: string[]): Promise<number>;
   };

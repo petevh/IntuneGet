@@ -7,6 +7,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { StatusBadge, type StatusTone } from '@/components/ui/status-badge';
 import { cn } from '@/lib/utils';
 import type { MatchStatus } from '@/types/unmanaged';
 
@@ -19,34 +20,18 @@ interface MatchStatusBadgeProps {
 const statusConfig: Record<MatchStatus, {
   label: string;
   icon: typeof CheckCircle2;
-  colors: string;
+  tone: StatusTone;
 }> = {
-  matched: {
-    label: 'Matched',
-    icon: CheckCircle2,
-    colors: 'bg-status-success/10 text-status-success border-status-success/20',
-  },
-  partial: {
-    label: 'Partial Match',
-    icon: AlertCircle,
-    colors: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
-  },
-  unmatched: {
-    label: 'No Match',
-    icon: HelpCircle,
-    colors: 'bg-overlay/5 text-text-muted border-overlay/10',
-  },
-  pending: {
-    label: 'Pending',
-    icon: Clock,
-    colors: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
-  },
+  matched: { label: 'Matched', icon: CheckCircle2, tone: 'success' },
+  partial: { label: 'Partial Match', icon: AlertCircle, tone: 'warning' },
+  unmatched: { label: 'No Match', icon: HelpCircle, tone: 'neutral' },
+  pending: { label: 'Pending', icon: Clock, tone: 'info' },
 };
 
 function getConfidenceLabel(confidence: number): { label: string; color: string } {
-  if (confidence >= 0.9) return { label: 'High', color: 'text-emerald-400' };
-  if (confidence >= 0.7) return { label: 'Moderate', color: 'text-amber-400' };
-  return { label: 'Low', color: 'text-red-400' };
+  if (confidence >= 0.9) return { label: 'High', color: 'text-status-success' };
+  if (confidence >= 0.7) return { label: 'Moderate', color: 'text-status-warning' };
+  return { label: 'Low', color: 'text-status-error' };
 }
 
 function getConfidenceTooltip(status: MatchStatus, confidence: number | null | undefined): string {
@@ -62,27 +47,19 @@ function getConfidenceTooltip(status: MatchStatus, confidence: number | null | u
 
 export function MatchStatusBadge({ status, confidence, className }: MatchStatusBadgeProps) {
   const config = statusConfig[status];
-  const Icon = config.icon;
 
   const showConfidence = confidence !== null && confidence !== undefined && status !== 'unmatched';
   const confidenceInfo = showConfidence ? getConfidenceLabel(confidence!) : null;
 
   const badge = (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border cursor-default',
-        config.colors,
-        className
-      )}
-    >
-      <Icon className="w-3.5 h-3.5" />
+    <StatusBadge tone={config.tone} icon={config.icon} className={cn('cursor-default', className)}>
       <span>{config.label}</span>
       {showConfidence && confidenceInfo && (
         <span className={cn('font-semibold', confidenceInfo.color)}>
           {confidenceInfo.label}
         </span>
       )}
-    </span>
+    </StatusBadge>
   );
 
   return (
