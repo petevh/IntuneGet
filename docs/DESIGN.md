@@ -217,24 +217,62 @@ exe         →  (no universal default — verify per app)
 
 ---
 
-## 4. Store apps — the boundary can't be fully automated
+## 4. Store apps — prefer Intune's Store deployment whenever it manages updates
 
-The catalog tags apps by source, which *looks* like a clean gate. It isn't.
+**The principle (outcome-based, not packaging-type-based):** if Intune's native
+*Microsoft Store app (new)* can add the app **and keep it version-updated**, use
+that — don't package it with IntuneGet. IntuneGet's Win32 packaging is for apps
+the Store can't manage. This is the right optimization: it gives native detection,
+Intune-managed updates, built-in monitoring, and **zero exposure to the Win32
+packaging bugs** logged in UPSTREAM-ISSUES.md — which is most of what this project
+spends its effort on. The decision hinges on *manageability*, not on whether the
+app is "really" a Store/UWP app.
 
-- **Native, for genuine Store apps:** Intune → Apps → *Microsoft Store app (new)*.
-  Native detection, Store-driven updates, built-in monitoring, zero exposure to
-  third-party packaging bugs. Strictly better whenever it applies.
-- **Don't trust `app_source`:** only **11** apps are tagged `store` — almost all
-  Microsoft's own (Company Portal, To Do, Whiteboard, Snipping Tool, WhatsApp, …).
-  **1Password is tagged `win32` despite being a real Store app**, so IntuneGet
-  packaged it as Win32. The field means "how winget sourced it," not "is it in the
-  Store."
+**Key finding (corrected 2026-07-25): Intune manages updates for Win32 Store apps
+too, not just UWP.** Per Microsoft's own docs
+(<https://learn.microsoft.com/en-us/intune/app-management/deployment/add-microsoft-store>,
+updated 2026-07-01):
 
-**Practical rule: check the Store first, by hand, for any given app.** The
-`app_source = 'win32'` filter is a weak safety net — catches the 11 obvious cases,
-misses exactly the third-party apps most likely to trip you up. Automating this
-properly means querying the Store API by name (a separate lookup the catalog can't
-stand in for) — worth building only if the manual check becomes a burden.
+> "Microsoft Store Win32 apps are kept up to date by Intune, therefore in order for
+> the app to be updated it must be assigned in Intune. App updates are not affected
+> by the Store's update policies."
+
+and
+
+> "The Microsoft Store supports … now Win32 apps packaged in `.exe` or `.msi`
+> installers."
+
+So the earlier framing ("only *genuine* UWP Store apps get the native benefit") was
+**wrong**. A `Win32*` entry in the Store picker still gets Intune-driven automatic
+updates. Worked example: **Adobe Acrobat Reader DC** shows in Intune's
+*Store app (new)* search as `Win32*` (as do Adobe Creative Cloud; Adobe Express is
+`UWP`). By this principle Acrobat should be deployed from the Store, not packaged —
+even though it's the app whose Win32 path surfaced UPSTREAM-ISSUES #2/#3/#5.
+
+**Caveats that gate the "use the Store" decision:**
+- **Win32 Store apps are in PREVIEW** — "Not all Win32 apps will be available or
+  searchable." Verify the specific app appears in the picker (Acrobat does).
+- **Required vs Available assignment:** a *Required* assignment installs and
+  auto-updates hands-off; an *Available* app only comes under Intune's update
+  management **after the user installs it from Company Portal**.
+- **Vendor-hosted content:** third-party Win32 Store apps download from the
+  publisher's infrastructure — behind a firewall, that endpoint must be reachable
+  (same constraint as IntuneGet packaging, so no worse).
+- **No ARM64:** any app whose Store installer is ARM64 isn't supported.
+
+**Don't trust `app_source` to make this call.** Only ~11 catalog apps are tagged
+`store` (mostly Microsoft's own — Company Portal, To Do, Whiteboard, …), and the
+tag means "how winget sourced it," not "is it in the Store." Two ways it misleads,
+in opposite directions:
+- **1Password** is tagged `win32` yet is a genuine Store app.
+- **Acrobat** is tagged `win32` and *is* available in the Store as a `Win32*` app
+  that Intune can update — so the tag doesn't tell you the Store route is available.
+
+**Practical rule: check Intune's *Store app (new)* picker by hand for any app you're
+about to package.** The `app_source` filter is a weak safety net. Automating this
+means querying the Store availability by name (a separate lookup the catalog can't
+stand in for) — worth building if the manual check becomes a burden, and now
+higher-value since the Store covers Win32 too.
 
 ---
 
