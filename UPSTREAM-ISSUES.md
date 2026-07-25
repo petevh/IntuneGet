@@ -170,4 +170,72 @@ command string. Minimum fix: the extractor must preserve bare `KEY=VALUE` tokens
 
 ---
 
+## 3. `normalizeInstallers` drops a root-level manifest `ProductCode`
+
+**Date:** 2026-07-25
+**Severity:** High (wrong detection rule shipped to Intune; app never detects as
+installed, or detects against a folder that doesn't exist)
+**Fork fix:** `lib/manifest-api.ts` — `normalizeInstallers`
+**Affected files (both upstream/main and fork):** `lib/manifest-api.ts:507`
+
+### Symptom
+Packaging `Adobe.Acrobat.Reader.64-bit` produces a file-existence detection
+rule of `%ProgramFiles%\Adobe Acrobat Reader (64-bit)` — the literal display
+name used as a guessed folder name. Acrobat doesn't install to that path, so
+the app never reports as installed and Intune keeps re-pushing it.
+
+### Root cause
+Winget manifests commonly declare shared installer fields once at the
+manifest **root** rather than repeating them on every entry in `Installers:`
+— this is standard winget-pkgs practice for anything that doesn't vary per
+architecture/locale. Adobe's manifest declares `ProductCode` this way:
+
+```yaml
+PackageIdentifier: Adobe.Acrobat.Reader.64-bit
+ProductCode: '{AC76BA86-1033-FF00-7760-BC15014EA700}'
+Installers:
+  - Architecture: x64
+    InstallerType: burn
+    InstallerUrl: ...
+    # no per-installer ProductCode override
+```
+
+`normalizeInstallers` (`lib/manifest-api.ts`) already merges root-level
+defaults down onto each installer entry for `InstallerType`, `Scope`,
+`InstallerSwitches`, `UpgradeBehavior`, `Platform`, `MinimumOSVersion`, and
+`Dependencies` — but not `ProductCode`:
+
+```ts
+ProductCode: installer.ProductCode as string,   // no `|| defaultProductCode`
+```
+
+So `NormalizedInstaller.productCode` ends up `undefined` for any manifest
+using the root-level form, even though the manifest clearly declares one.
+
+This was a low-impact latent bug against upstream's original marker-first
+detection strategy (`productCode` was only a secondary MSI fallback, used
+when `wingetId`/`version` were missing — rare). It became high-impact on this
+fork's native-first detection strategy (`feat/web-native-detection`,
+`generateUninstallRegistryDetectionRules`), which depends on `productCode` as
+the *primary* signal for msi/wix/exe/inno/nullsoft/burn installers. Missing
+it there means every such installer that uses the root-level manifest form
+silently falls through to blind folder-name guessing instead of a real
+uninstall-registry-key detection rule.
+
+### Reproduction for upstream
+1. Package any winget app whose manifest declares `ProductCode` at the root
+   level rather than per-installer (e.g. `Adobe.Acrobat.Reader.64-bit`).
+2. Inspect `NormalizedInstaller.productCode` — it's `undefined`.
+3. On this fork's native-detection path: the generated detection rule is a
+   folder-existence guess instead of an uninstall-registry-key rule. On
+   upstream/main: any code path consulting `installer.productCode` (e.g. the
+   MSI-without-marker fallback) silently gets nothing.
+
+### Fix
+Add `defaultProductCode = manifest.ProductCode as string` alongside the other
+top-level defaults in `normalizeInstallers`, and merge it the same way:
+`ProductCode: (installer.ProductCode as string) || defaultProductCode`.
+
+---
+
 <!-- Add further issues below in the same format. -->

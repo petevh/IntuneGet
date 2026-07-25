@@ -504,7 +504,7 @@ export async function getFullManifest(
 /**
  * Normalize installers from raw YAML
  */
-function normalizeInstallers(manifest: Record<string, unknown>): WingetInstaller[] {
+export function normalizeInstallers(manifest: Record<string, unknown>): WingetInstaller[] {
   const rawInstallers = (manifest.Installers as Array<Record<string, unknown>>) || [];
 
   // Get top-level defaults
@@ -517,6 +517,7 @@ function normalizeInstallers(manifest: Record<string, unknown>): WingetInstaller
   const defaultMinOS = manifest.MinimumOSVersion as string;
   const defaultUpgrade = manifest.UpgradeBehavior as string;
   const defaultDependencies = manifest.Dependencies as WingetInstaller['Dependencies'];
+  const defaultProductCode = manifest.ProductCode as string;
 
   return rawInstallers.map((installer) => ({
     Architecture: (installer.Architecture as WingetInstaller['Architecture']) || 'x64',
@@ -534,7 +535,7 @@ function normalizeInstallers(manifest: Record<string, unknown>): WingetInstaller
            (defaultScope as WingetInstaller['Scope']),
     InstallerSwitches: (installer.InstallerSwitches as WingetInstaller['InstallerSwitches']) ||
                        defaultSwitches,
-    ProductCode: installer.ProductCode as string,
+    ProductCode: (installer.ProductCode as string) || defaultProductCode,
     PackageFamilyName: installer.PackageFamilyName as string,
     UpgradeBehavior: (installer.UpgradeBehavior as WingetInstaller['UpgradeBehavior']) ||
                      (defaultUpgrade as WingetInstaller['UpgradeBehavior']),

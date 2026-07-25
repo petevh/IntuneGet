@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   normalizeInstaller,
+  normalizeInstallers,
   fetchLocaleManifest,
   getFullManifest,
   clearManifestCache,
@@ -525,6 +526,68 @@ describe('normalizeInstaller', () => {
 
       expect(normalizeInstaller(installer).architecture).toBe('neutral');
     });
+  });
+});
+
+describe('normalizeInstallers (root-level default merging)', () => {
+  // Regression test: winget manifests commonly declare shared fields (Scope,
+  // InstallerSwitches, ProductCode, etc.) once at the manifest root instead of
+  // repeating them on every installer entry - e.g. Adobe Acrobat Reader
+  // declares ProductCode at the root, not per-installer. normalizeInstallers
+  // must merge every root default down onto each installer; missing even one
+  // field silently drops it for any manifest that relies on the root form,
+  // which for ProductCode meant native uninstall-registry detection had
+  // nothing to key on and fell back to guessing a folder name from the
+  // display name instead.
+  it('merges a root-level ProductCode onto installers that do not repeat it', () => {
+    const manifest = {
+      ProductCode: '{AC76BA86-1033-FF00-7760-BC15014EA700}',
+      Installers: [
+        {
+          Architecture: 'x64',
+          InstallerUrl: 'https://example.com/reader.exe',
+          InstallerSha256: 'abc123',
+          InstallerType: 'burn',
+        },
+      ],
+    };
+
+    const [installer] = normalizeInstallers(manifest);
+    expect(installer.ProductCode).toBe('{AC76BA86-1033-FF00-7760-BC15014EA700}');
+  });
+
+  it('prefers a per-installer ProductCode over the root default when both are present', () => {
+    const manifest = {
+      ProductCode: '{ROOT-0000-0000-0000-000000000000}',
+      Installers: [
+        {
+          Architecture: 'x64',
+          InstallerUrl: 'https://example.com/reader.exe',
+          InstallerSha256: 'abc123',
+          InstallerType: 'msi',
+          ProductCode: '{PER-INSTALLER-0000-0000-000000000000}',
+        },
+      ],
+    };
+
+    const [installer] = normalizeInstallers(manifest);
+    expect(installer.ProductCode).toBe('{PER-INSTALLER-0000-0000-000000000000}');
+  });
+
+  it('leaves ProductCode undefined when neither the installer nor the root manifest declares one', () => {
+    const manifest = {
+      Installers: [
+        {
+          Architecture: 'x64',
+          InstallerUrl: 'https://example.com/app.exe',
+          InstallerSha256: 'abc123',
+          InstallerType: 'nullsoft',
+        },
+      ],
+    };
+
+    const [installer] = normalizeInstallers(manifest);
+    expect(installer.ProductCode).toBeUndefined();
   });
 });
 
