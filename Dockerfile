@@ -34,8 +34,12 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
-# Copy built application
-COPY --from=builder /app/public ./public
+# Copy built application. public/ is read at runtime by the non-root nextjs user
+# (e.g. app scandir's public/brand), so normalize perms on the way in: the build
+# context may carry restrictive dir perms from the host FS (e.g. an NFS share that
+# stamps new dirs 770 / no world-read), which would otherwise EACCES at runtime.
+# --chmod makes the image self-correcting regardless of the checkout's perms.
+COPY --from=builder --chown=nextjs:nodejs --chmod=755 /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
