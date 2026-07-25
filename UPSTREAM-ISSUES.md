@@ -488,4 +488,53 @@ Inno/NSIS).
 
 ---
 
+## 7. Bare `msiexec /x` uninstallCommandLine races Intune's own post-enforcement detection re-check
+
+**Date:** 2026-07-25
+**Severity:** Medium (uninstall reported as failed in Intune even though it
+actually succeeds moments later — cosmetic/reporting issue, not a real
+device-state problem, but confusing and noisy)
+**Fork fix:** `packager/src/job-processor.ts` — `generateNativeMsiUninstallScript`
+
+### Symptom
+Confirmed live against Adobe Acrobat Reader: after issue #6's fix, the
+native `IntuneWin32App` uninstall (`msiexec /x {ProductCode} /qn /norestart`
+as a bare `uninstallCommandLine`) genuinely removed the app — a direct
+registry check afterward confirmed it was gone — but Intune still reported
+the enforcement as `Error` (`EnforcementErrorCode: -2016345059`).
+
+IME's own log shows exactly why:
+```
+EnforcementState: InProgressDownloadCompleted -> Success, EnforcementErrorCode: null -> 0   (msiexec exited 0)
+Detection running for policy ...
+Policy ... is expected to have enforcement state: NotDetected.
+EnforcementState: Success -> Error, EnforcementErrorCode: 0 -> -2016345059                    (~150ms later)
+Detection ... resulted in action status: Success and detection state: Detected.               (still sees it!)
+```
+
+### Root cause
+`msiexec.exe /x ... /qn` commonly hands off the actual uninstall work to the
+Windows Installer background service and its front-end process can return
+before that service finishes committing the removal (registry/file
+cleanup). Intune Management Extension re-runs detection within roughly
+100-150ms of the enforcement process exiting — fast enough to race ahead of
+that commit and see the stale "still installed" registry state, so it marks
+the enforcement as failed even though the uninstall completes correctly a
+moment later.
+
+### Fix
+`buildNativeCommandLines` no longer emits a bare `msiexec /x` command line
+for the native build path. It now always routes MSI uninstalls (both the
+`installer_type: msi/wix` case and the ProductCode-from-detection-rules case
+from issue #6) through a generated `Uninstall.ps1` that runs msiexec via
+`Start-Process -Wait`, then waits (up to 2 minutes) on the machine-wide
+`Global\_MSIExecute` mutex — the same mutex Windows Installer itself
+serializes every install/uninstall/repair operation through, and the same
+technique PSADT's `Start-ADTProcess -WaitForMsiExec` uses internally — before
+returning the original msiexec exit code. Control is only handed back to
+Intune once Windows Installer is genuinely idle, so the post-enforcement
+detection re-check no longer races ahead of the real state.
+
+---
+
 <!-- Add further issues below in the same format. -->

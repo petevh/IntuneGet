@@ -151,7 +151,15 @@ describe('buildNativeCommandLines', () => {
     expect(result.uninstallScript).toContain('QuietUninstallString');
   });
 
-  it('builds msiexec install/uninstall for MSI using the product code when present', () => {
+  it('builds an msiexec uninstall script (not a bare command line) for MSI using the product code when present', () => {
+    // Regression test for a live failure: a bare `msiexec /x {code} /qn
+    // /norestart` uninstallCommandLine races Intune's own post-enforcement
+    // detection re-check - msiexec's front-end process can exit before
+    // Windows Installer actually finishes committing the removal, so the
+    // near-immediate re-check still sees the old registry state and Intune
+    // reports the uninstall as failed even though it succeeds moments
+    // later (confirmed live against Adobe Acrobat Reader). The uninstall
+    // must go through a script that waits on the Global\_MSIExecute mutex.
     const job = makeJob({
       installer_type: 'msi',
       install_command: '"app.msi"',
@@ -160,15 +168,17 @@ describe('buildNativeCommandLines', () => {
     const result = processor().buildNativeCommandLines(job, 'app.msi');
 
     expect(result.install).toBe('msiexec /i "app.msi" /qn /norestart');
-    expect(result.uninstall).toBe('msiexec /x {11111111-2222-3333-4444-555555555555} /qn /norestart');
-    expect(result.uninstallScript).toBeNull();
+    expect(result.uninstall).toBe('powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1');
+    expect(result.uninstallScript).toContain('/x {11111111-2222-3333-4444-555555555555} /qn /norestart');
+    expect(result.uninstallScript).toContain("OpenExisting('Global\\_MSIExecute')");
   });
 
-  it('falls back to a filename-based msiexec uninstall when no product code is present', () => {
+  it('falls back to a filename-based msiexec target when no product code is present', () => {
     const job = makeJob({ installer_type: 'msi', install_command: '"app.msi"', uninstall_command: '' });
     const result = processor().buildNativeCommandLines(job, 'app.msi');
 
-    expect(result.uninstall).toBe('msiexec /x "app.msi" /qn /norestart');
+    expect(result.uninstall).toBe('powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1');
+    expect(result.uninstallScript).toContain('/x "app.msi" /qn /norestart');
   });
 
   it('uses a direct msiexec uninstall for an exe installer that wraps an MSI, when detection knows the ProductCode', () => {
@@ -196,8 +206,9 @@ describe('buildNativeCommandLines', () => {
     const result = processor().buildNativeCommandLines(job, 'AcroRdrDCx64.exe');
 
     expect(result.install).toBe('"AcroRdrDCx64.exe" /sAll /msi EULA_ACCEPT=YES');
-    expect(result.uninstall).toBe('msiexec /x {AC76BA86-1033-FF00-7760-BC15014EA700} /qn /norestart');
-    expect(result.uninstallScript).toBeNull();
+    expect(result.uninstall).toBe('powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1');
+    expect(result.uninstallScript).toContain('/x {AC76BA86-1033-FF00-7760-BC15014EA700} /qn /norestart');
+    expect(result.uninstallScript).toContain("OpenExisting('Global\\_MSIExecute')");
   });
 
   it('still falls back to the generic Uninstall.ps1 script for a non-MSI exe with no ProductCode anywhere', () => {

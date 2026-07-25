@@ -545,10 +545,13 @@ export class JobProcessor {
       : this.getProductCodeFromDetectionRules(job);
 
     if (isMsi || productCode) {
-      const uninstall = productCode
-        ? `msiexec /x ${productCode} /qn /norestart`
-        : `msiexec /x "${installerFileName}" /qn /norestart`;
-      return { install, uninstall, setupFilePath: installerFileName, uninstallScript: null };
+      const msiTarget = productCode ? productCode : `"${installerFileName}"`;
+      return {
+        install,
+        uninstall: 'powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1',
+        setupFilePath: installerFileName,
+        uninstallScript: this.generateNativeMsiUninstallScript(msiTarget),
+      };
     }
 
     // No PSADT and no known MSI product code: uninstall has to be resolved
@@ -587,6 +590,51 @@ export class JobProcessor {
       }
     }
     return undefined;
+  }
+
+  /**
+   * Generate a standalone msiexec uninstall script that waits for Windows
+   * Installer to actually finish, not just for the msiexec.exe front-end
+   * process to exit.
+   *
+   * msiexec /x /qn commonly hands off to the Windows Installer service and
+   * returns control to its caller before that service has finished
+   * committing the removal (registry/file cleanup). A bare
+   * `msiexec /x {code} /qn /norestart` uninstallCommandLine races against
+   * Intune's own post-enforcement detection re-check, which runs within
+   * ~100ms of the process exiting: msiexec reports success, but detection
+   * still sees the old registry state and Intune reports the uninstall as
+   * failed even though it actually succeeds moments later (confirmed live
+   * against Adobe Acrobat Reader - msiexec exited 0, but the immediate
+   * re-check still saw the uninstall-registry key, and a direct registry
+   * check afterward confirmed the app really was gone).
+   *
+   * Windows Installer serializes every install/uninstall/repair operation
+   * through the machine-wide `Global\_MSIExecute` mutex, so waiting for that
+   * mutex to become available - the same technique PSADT's
+   * `Start-ADTProcess -WaitForMsiExec` uses internally - means we only hand
+   * control back once Windows Installer is genuinely idle.
+   */
+  private generateNativeMsiUninstallScript(msiTarget: string): string {
+    return `$ErrorActionPreference = 'Stop'
+$proc = Start-Process -FilePath msiexec.exe -ArgumentList '/x ${msiTarget} /qn /norestart' -Wait -PassThru
+$exitCode = $proc.ExitCode
+
+try {
+    $mutex = [System.Threading.Mutex]::OpenExisting('Global\\_MSIExecute')
+    try {
+        $mutex.WaitOne(120000) | Out-Null
+        $mutex.ReleaseMutex()
+    } finally {
+        $mutex.Dispose()
+    }
+} catch {
+    # Mutex not present (Windows Installer already idle) or inaccessible -
+    # nothing more to wait for.
+}
+
+exit $exitCode
+`;
   }
 
   /**
