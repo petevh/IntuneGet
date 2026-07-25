@@ -4,6 +4,7 @@ import {
   normalizeInstallers,
   fetchLocaleManifest,
   getFullManifest,
+  getBestInstaller,
   clearManifestCache,
 } from '../manifest-api';
 import type { WingetInstaller, NormalizedInstaller } from '@/types/winget';
@@ -981,5 +982,72 @@ describe('getFullManifest description order', () => {
       String(call[0]).includes('raw.githubusercontent.com')
     );
     expect(githubCalls).toHaveLength(3);
+  });
+});
+
+describe('getBestInstaller ProductCode preference', () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+    clearManifestCache();
+  });
+
+  // Winget splits one architecture across several installer nodes and only
+  // carries the ProductCode (uninstall-registry key) on some of them — e.g.
+  // 7-Zip lists ARP DisplayName nodes before the MSI ProductCode node. Arch
+  // alone would pick the first x64 node, which has no ProductCode, starving
+  // native detection. Among same-arch nodes, prefer one that carries a code.
+  it('prefers a same-arch installer node that carries a ProductCode', async () => {
+    mockFetch.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('Seven.Zip.installer.yaml')) {
+        return yamlResponse(
+          [
+            'PackageIdentifier: Seven.Zip',
+            'InstallerType: exe',
+            'Installers:',
+            '  - Architecture: x64',
+            '    InstallerUrl: https://example.com/7z-arp.exe',
+            '    InstallerSha256: aaa',
+            '  - Architecture: x64',
+            '    InstallerType: msi',
+            '    InstallerUrl: https://example.com/7z.msi',
+            '    InstallerSha256: bbb',
+            '    ProductCode: "{23170F69-40C1-2701-2602-000001000000}"',
+          ].join('\n')
+        );
+      }
+      return notFound();
+    });
+
+    const installer = await getBestInstaller('Seven.Zip', '1.0.0', 'x64');
+
+    expect(installer?.productCode).toBe('{23170F69-40C1-2701-2602-000001000000}');
+    expect(installer?.url).toBe('https://example.com/7z.msi');
+  });
+
+  it('falls back to the first same-arch node when none carries a ProductCode', async () => {
+    mockFetch.mockImplementation(async (input: unknown) => {
+      const url = String(input);
+      if (url.endsWith('No.Code.installer.yaml')) {
+        return yamlResponse(
+          [
+            'PackageIdentifier: No.Code',
+            'InstallerType: nullsoft',
+            'Installers:',
+            '  - Architecture: x64',
+            '    InstallerUrl: https://example.com/first.exe',
+            '    InstallerSha256: aaa',
+            '  - Architecture: x64',
+            '    InstallerUrl: https://example.com/second.exe',
+            '    InstallerSha256: bbb',
+          ].join('\n')
+        );
+      }
+      return notFound();
+    });
+
+    const installer = await getBestInstaller('No.Code', '1.0.0', 'x64');
+
+    expect(installer?.url).toBe('https://example.com/first.exe');
   });
 });

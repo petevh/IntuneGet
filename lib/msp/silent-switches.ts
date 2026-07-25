@@ -21,6 +21,7 @@ export function extractSilentSwitches(installCommand: string, installerType: str
   // Strip executable path first (handles paths with hyphens like "7z2501-x64.exe")
   // This removes everything up to and including common installer extensions
   let cleaned = installCommand
+    .replace(/^msiexec(?:\.exe)?\s+/i, '') // Remove a leading bare `msiexec` / `msiexec.exe`
     .replace(/^"[^"]+"\s*/, '') // Remove quoted paths like "C:\path\installer.exe"
     .replace(/^\S+\.(exe|msi|msix|appx)\s*/i, ''); // Remove unquoted paths ending in installer extensions
 
@@ -32,10 +33,17 @@ export function extractSilentSwitches(installCommand: string, installerType: str
     .replace(/\/[ixp]\s+\S+\.(msi|msp)\s*/gi, '') // /i filename.msi
     .replace(/\/[ixp]\s+/gi, ''); // /i alone (leftover)
 
-  // Extract switches from remaining string (starts with / or -)
-  const switchMatch = cleaned.match(/(?:\/\S+|-{1,2}\S+)(?:\s+(?:\/\S+|-{1,2}\S+))*/);
-  if (switchMatch && switchMatch[0] !== '-DeploymentType') {
-    return switchMatch[0];
+  // Whatever remains after stripping the installer path and any msiexec action
+  // switches IS the switch list — return it verbatim. The previous approach
+  // pattern-matched only /- or --prefixed tokens and stopped at the first token
+  // that didn't start with / or -, which silently dropped bare KEY=VALUE
+  // switches (ACCEPT_EULA=1, ALLUSERS=1, a --campaign <id> value, etc.). See
+  // UPSTREAM-ISSUES.md #2. Prefer the normalized silentArgs carried as
+  // structured data (resolveSilentArgs); this extractor is now only a fallback
+  // for command strings we can't otherwise resolve.
+  const switches = cleaned.trim();
+  if (switches && !switches.startsWith('-DeploymentType')) {
+    return switches;
   }
 
   return defaultSwitches[installerType] || '/S';

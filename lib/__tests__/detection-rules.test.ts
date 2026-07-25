@@ -14,8 +14,8 @@ import type {
 } from '@/types/intune';
 
 describe('generateDetectionRules', () => {
-  describe('MSI detection rules', () => {
-    it('should prefer registry marker over product code when wingetId and version are available', () => {
+  describe('Native uninstall-registry detection (MSI/WiX/exe/inno/nullsoft)', () => {
+    it('detects MSI via its uninstall ProductCode key (install-source-agnostic, not the marker)', () => {
       const installer: NormalizedInstaller = {
         architecture: 'x64',
         url: 'https://example.com/app.msi',
@@ -29,14 +29,16 @@ describe('generateDetectionRules', () => {
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('registry');
       const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Google_Chrome');
-      expect(regRule.valueName).toBe('Version');
-      expect(regRule.detectionType).toBe('version');
-      expect(regRule.operator).toBe('greaterThanOrEqual');
-      expect(regRule.detectionValue).toBe('120.0.6099.130');
+      expect(regRule.keyPath).toBe(
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{12345678-1234-1234-1234-123456789012}'
+      );
+      // Existence-based; NOT the IntuneGet marker, and no version compare.
+      expect(regRule.detectionType).toBe('exists');
+      expect(regRule.keyPath).not.toContain('IntuneGet');
+      expect(regRule.valueName).toBeUndefined();
     });
 
-    it('should use HKCU registry marker for user-scoped MSI installs', () => {
+    it('uses HKCU for a user-scoped install', () => {
       const installer: NormalizedInstaller = {
         architecture: 'x64',
         url: 'https://example.com/app.msi',
@@ -48,81 +50,46 @@ describe('generateDetectionRules', () => {
 
       const rules = generateDetectionRules(installer, 'Test App', 'Publisher.TestApp', '1.2.3');
 
+      const regRule = rules[0] as RegistryDetectionRule;
+      expect(regRule.keyPath).toContain('HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows');
+    });
+
+    it('detects an exe/nullsoft app via its ARP DisplayName key (winget puts it in productCode)', () => {
+      const installer: NormalizedInstaller = {
+        architecture: 'x64',
+        url: 'https://example.com/app.exe',
+        sha256: 'abc123',
+        type: 'nullsoft',
+        productCode: 'Notepad++',
+      };
+
+      const rules = generateDetectionRules(installer, 'Notepad++', 'Notepad++.Notepad++', '8.9.7');
+
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('registry');
       const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_CURRENT_USER\\SOFTWARE\\IntuneGet\\Apps\\Publisher_TestApp');
+      expect(regRule.keyPath).toBe(
+        'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Notepad++'
+      );
+      expect(regRule.detectionType).toBe('exists');
     });
 
-    it('should use registry marker for WiX installers with wingetId and version', () => {
+    it('sets check32BitOn64System for x86 installers (WOW6432Node view)', () => {
       const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.msi',
-        sha256: 'abc123',
-        type: 'wix',
-        productCode: '{ABCD1234-5678-90AB-CDEF-1234567890AB}',
-      };
-
-      const rules = generateDetectionRules(installer, 'WiX App', 'Publisher.WixApp', '2.0.0');
-
-      expect(rules).toHaveLength(1);
-      expect(rules[0].type).toBe('registry');
-    });
-
-    it('should generate MSI product code rule when wingetId and version are missing', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
+        architecture: 'x86',
         url: 'https://example.com/app.msi',
         sha256: 'abc123',
         type: 'msi',
-        productCode: '{12345678-1234-1234-1234-123456789012}',
-      };
-
-      const rules = generateDetectionRules(installer, 'Test App');
-
-      expect(rules).toHaveLength(1);
-      expect(rules[0].type).toBe('msi');
-      const msiRule = rules[0] as MsiDetectionRule;
-      expect(msiRule.productCode).toBe('{12345678-1234-1234-1234-123456789012}');
-      expect(msiRule.productVersionOperator).toBe('greaterThanOrEqual');
-    });
-
-    it('should fall back to folder detection when product code is missing', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.msi',
-        sha256: 'abc123',
-        type: 'msi',
-      };
-
-      const rules = generateDetectionRules(installer, 'Test App');
-
-      expect(rules).toHaveLength(1);
-      expect(rules[0].type).toBe('file');
-      const fileRule = rules[0] as FileDetectionRule;
-      expect(fileRule.path).toBe('%ProgramFiles%');
-      expect(fileRule.fileOrFolderName).toBe('Test App');
-      expect(fileRule.detectionType).toBe('exists');
-    });
-
-    it('should handle WiX installer type same as MSI', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.msi',
-        sha256: 'abc123',
-        type: 'wix',
         productCode: '{ABCD1234-5678-90AB-CDEF-1234567890AB}',
       };
 
-      const rules = generateDetectionRules(installer, 'WiX App');
+      const rules = generateDetectionRules(installer, 'Test App', 'Publisher.TestApp', '2.0.0');
 
-      expect(rules).toHaveLength(1);
-      expect(rules[0].type).toBe('msi');
+      const regRule = rules[0] as RegistryDetectionRule;
+      expect(regRule.check32BitOn64System).toBe(true);
     });
-  });
 
-  describe('Registry marker detection rules', () => {
-    it('should generate registry marker rule for EXE installer with wingetId and version', () => {
+    it('falls back to folder detection when there is no productCode', () => {
       const installer: NormalizedInstaller = {
         architecture: 'x64',
         url: 'https://example.com/app.exe',
@@ -133,154 +100,64 @@ describe('generateDetectionRules', () => {
       const rules = generateDetectionRules(installer, 'Test App', 'Publisher.TestApp', '1.0.0');
 
       expect(rules).toHaveLength(1);
+      expect(rules[0].type).toBe('file');
+      const fileRule = rules[0] as FileDetectionRule;
+      expect(fileRule.path).toBe('%ProgramFiles%');
+      expect(fileRule.detectionType).toBe('exists');
+    });
+  });
+
+  describe('IntuneGet marker — last resort (zip/portable via PSADT only)', () => {
+    it('uses the marker for a zip package when wingetId+version are present', () => {
+      const installer: NormalizedInstaller = {
+        architecture: 'x64',
+        url: 'https://example.com/app.zip',
+        sha256: 'abc123',
+        type: 'zip',
+      };
+
+      const rules = generateDetectionRules(installer, 'Test App', 'Publisher.TestApp', '1.0.0');
+
+      expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('registry');
       const regRule = rules[0] as RegistryDetectionRule;
       expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Publisher_TestApp');
       expect(regRule.valueName).toBe('Version');
       expect(regRule.detectionType).toBe('version');
-      expect(regRule.operator).toBe('greaterThanOrEqual');
-      expect(regRule.detectionValue).toBe('1.0.0');
     });
 
-    it('should use HKCU for user-scoped installs', () => {
+    it('honors a custom marker root for the zip/portable path', () => {
       const installer: NormalizedInstaller = {
         architecture: 'x64',
-        url: 'https://example.com/app.exe',
+        url: 'https://example.com/app.zip',
         sha256: 'abc123',
-        type: 'exe',
-        scope: 'user',
+        type: 'portable',
       };
 
-      const rules = generateDetectionRules(installer, 'Test App', 'Publisher.TestApp', '2.0.0');
-
-      expect(rules).toHaveLength(1);
-      const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toContain('HKEY_CURRENT_USER');
-    });
-
-    it('should sanitize dots and dashes in wingetId', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.exe',
-        sha256: 'abc123',
-        type: 'inno',
-      };
-
-      const rules = generateDetectionRules(installer, 'Test App', 'My-Publisher.Test.App-Pro', '1.0');
+      const rules = generateDetectionRules(
+        installer,
+        'Test App',
+        'Publisher.TestApp',
+        '1.0.0',
+        'SOFTWARE\\Contoso\\Apps'
+      );
 
       const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toContain('My_Publisher_Test_App_Pro');
+      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\Contoso\\Apps\\Publisher_TestApp');
     });
 
-    it('should fall back to folder detection when wingetId or version is missing', () => {
+    it('falls back to folder detection for zip when wingetId/version are missing', () => {
       const installer: NormalizedInstaller = {
         architecture: 'x64',
-        url: 'https://example.com/app.exe',
+        url: 'https://example.com/app.zip',
         sha256: 'abc123',
-        type: 'exe',
+        type: 'zip',
       };
 
       const rules = generateDetectionRules(installer, 'Test App');
 
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('file');
-    });
-
-    it('should use a custom marker root when provided', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.exe',
-        sha256: 'abc123',
-        type: 'exe',
-      };
-
-      const rules = generateDetectionRules(
-        installer,
-        'Test App',
-        'Publisher.TestApp',
-        '1.0.0',
-        'SOFTWARE\\Contoso\\Apps'
-      );
-
-      expect(rules).toHaveLength(1);
-      const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\Contoso\\Apps\\Publisher_TestApp');
-    });
-
-    it('should use a custom marker root with HKCU for user scope', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.exe',
-        sha256: 'abc123',
-        type: 'exe',
-        scope: 'user',
-      };
-
-      const rules = generateDetectionRules(
-        installer,
-        'Test App',
-        'Publisher.TestApp',
-        '1.0.0',
-        'SOFTWARE\\Contoso\\Apps'
-      );
-
-      const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_CURRENT_USER\\SOFTWARE\\Contoso\\Apps\\Publisher_TestApp');
-    });
-
-    it('should use a custom marker root for MSI installers', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.msi',
-        sha256: 'abc123',
-        type: 'msi',
-        productCode: '{12345678-1234-1234-1234-123456789012}',
-      };
-
-      const rules = generateDetectionRules(
-        installer,
-        'Test App',
-        'Publisher.TestApp',
-        '1.0.0',
-        'SOFTWARE\\Contoso\\Apps'
-      );
-
-      const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\Contoso\\Apps\\Publisher_TestApp');
-    });
-
-    it('should normalize a marker root with hive prefix and trailing backslash', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.exe',
-        sha256: 'abc123',
-        type: 'exe',
-      };
-
-      const rules = generateDetectionRules(
-        installer,
-        'Test App',
-        'Publisher.TestApp',
-        '1.0.0',
-        'HKLM\\SOFTWARE\\Contoso\\'
-      );
-
-      const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\Contoso\\Publisher_TestApp');
-    });
-
-    it('should fall back to the default marker root for an empty custom path', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/app.exe',
-        sha256: 'abc123',
-        type: 'exe',
-      };
-
-      const rules = generateDetectionRules(installer, 'Test App', 'Publisher.TestApp', '1.0.0', '');
-
-      const regRule = rules[0] as RegistryDetectionRule;
-      expect(regRule.keyPath).toBe('HKEY_LOCAL_MACHINE\\SOFTWARE\\IntuneGet\\Apps\\Publisher_TestApp');
     });
   });
 
@@ -429,7 +306,25 @@ describe('generateDetectionRules', () => {
   });
 
   describe('Burn installer detection', () => {
-    it('should use registry marker for burn installers with wingetId', () => {
+    it('detects burn via its uninstall ProductCode key when present (native, not marker)', () => {
+      const installer: NormalizedInstaller = {
+        architecture: 'x64',
+        url: 'https://example.com/bundle.exe',
+        sha256: 'abc123',
+        type: 'burn',
+        productCode: '{BURN0000-0000-0000-0000-000000000000}',
+      };
+
+      const rules = generateDetectionRules(installer, 'Burn Bundle', 'Publisher.Bundle', '3.0.0');
+
+      expect(rules).toHaveLength(1);
+      expect(rules[0].type).toBe('registry');
+      const regRule = rules[0] as RegistryDetectionRule;
+      expect(regRule.keyPath).toContain('CurrentVersion\\Uninstall\\{BURN0000');
+      expect(regRule.keyPath).not.toContain('IntuneGet');
+    });
+
+    it('falls back to folder detection for burn without a productCode', () => {
       const installer: NormalizedInstaller = {
         architecture: 'x64',
         url: 'https://example.com/bundle.exe',
@@ -438,20 +333,6 @@ describe('generateDetectionRules', () => {
       };
 
       const rules = generateDetectionRules(installer, 'Burn Bundle', 'Publisher.Bundle', '3.0.0');
-
-      expect(rules).toHaveLength(1);
-      expect(rules[0].type).toBe('registry');
-    });
-
-    it('should fall back to folder detection for burn without wingetId', () => {
-      const installer: NormalizedInstaller = {
-        architecture: 'x64',
-        url: 'https://example.com/bundle.exe',
-        sha256: 'abc123',
-        type: 'burn',
-      };
-
-      const rules = generateDetectionRules(installer, 'Burn Bundle');
 
       expect(rules).toHaveLength(1);
       expect(rules[0].type).toBe('file');

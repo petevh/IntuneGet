@@ -1,10 +1,37 @@
 "use client";
 
 import { useMsal, useIsAuthenticated } from "@azure/msal-react";
-import { InteractionRequiredAuthError, AccountInfo } from "@azure/msal-browser";
+import { AccountInfo, IPublicClientApplication } from "@azure/msal-browser";
 import { graphScopes, getAdminConsentUrl } from "@/lib/msal-config";
 import { useCallback, useRef, useEffect, useState } from "react";
 import { isTokenExpiringSoon, getTokenExpiryMinutes } from "@/lib/token-utils";
+
+// Guard against redirect storms: once we've kicked off an interactive redirect
+// to recover from a failed silent acquisition, don't start another. Silent
+// acquisition uses a hidden, sandboxed iframe; when the session is stale MS
+// tries to top-navigate it, which the sandbox blocks, and the failure does NOT
+// always surface as InteractionRequiredAuthError. So we fall back to a
+// full-page redirect (which escapes the iframe) on ANY silent failure, and use
+// this flag so concurrent callers don't each fire their own redirect.
+let interactiveRedirectInFlight = false;
+
+async function recoverWithRedirect(
+  instance: IPublicClientApplication,
+  account: AccountInfo,
+): Promise<null> {
+  if (interactiveRedirectInFlight) return null;
+  interactiveRedirectInFlight = true;
+  try {
+    // Full-page redirect escapes the sandboxed silent-renew iframe entirely and
+    // cannot be popup-blocked. Navigates away; nothing is returned to this call.
+    await instance.acquireTokenRedirect({ scopes: graphScopes, account });
+  } catch {
+    // If even the redirect fails to start, clear the flag so a later attempt
+    // (e.g. after the user reloads) can try again.
+    interactiveRedirectInFlight = false;
+  }
+  return null;
+}
 
 /**
  * Hook to manage Microsoft authentication and access tokens
@@ -66,23 +93,10 @@ export function useMicrosoftAuth() {
       tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
 
       return tokenResponse.accessToken;
-    } catch (error) {
-      if (error instanceof InteractionRequiredAuthError) {
-        try {
-          const tokenResponse = await instance.acquireTokenPopup({
-            scopes: graphScopes,
-            account,
-          });
-
-          cachedTokenRef.current = tokenResponse.accessToken;
-          tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
-
-          return tokenResponse.accessToken;
-        } catch {
-          return null;
-        }
-      }
-      return null;
+    } catch {
+      // Any silent-acquisition failure (interaction required OR a blocked
+      // sandboxed iframe that never cleanly reports it) → interactive redirect.
+      return await recoverWithRedirect(instance, account);
     }
   }, [instance, accounts]);
 
@@ -114,23 +128,10 @@ export function useMicrosoftAuth() {
       tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
 
       return tokenResponse.accessToken;
-    } catch (error) {
-      if (error instanceof InteractionRequiredAuthError) {
-        try {
-          const tokenResponse = await instance.acquireTokenPopup({
-            scopes: graphScopes,
-            account,
-          });
-
-          cachedTokenRef.current = tokenResponse.accessToken;
-          tokenExpiryRef.current = tokenResponse.expiresOn?.getTime() || null;
-
-          return tokenResponse.accessToken;
-        } catch {
-          return null;
-        }
-      }
-      return null;
+    } catch {
+      // Any silent-acquisition failure (interaction required OR a blocked
+      // sandboxed iframe that never cleanly reports it) → interactive redirect.
+      return await recoverWithRedirect(instance, account);
     }
   }, [instance, accounts, refreshToken]);
 

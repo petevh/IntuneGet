@@ -548,11 +548,20 @@ jobs:
                   const rootType = installerManifest.InstallerType || null;
                   const rootScope = installerManifest.Scope || null;
                   const rootSwitches = installerManifest.InstallerSwitches || null;
+                  // Winget commonly declares ProductCode once at the manifest
+                  // root instead of per-installer (e.g. Adobe Acrobat Reader).
+                  // Merge it down like the other root defaults, otherwise the
+                  // stored installers blob loses the uninstall-registry key that
+                  // native detection keys on, and rule generation falls back to
+                  // guessing a folder name from the display name. Keep in sync
+                  // with normalizeInstallers() in lib/manifest-api.ts.
+                  const rootProductCode = installerManifest.ProductCode || null;
                   const installers = rawInstallers.map(inst => ({
                     ...inst,
                     InstallerType: inst.InstallerType || rootType,
                     Scope: inst.Scope || rootScope,
                     InstallerSwitches: inst.InstallerSwitches || rootSwitches,
+                    ProductCode: inst.ProductCode || rootProductCode,
                   }));
 
                   const versionRecord = {

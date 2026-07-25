@@ -479,7 +479,11 @@ export async function POST(request: NextRequest) {
               installerType: item.installerType,
               nestedInstallerType: item.nestedInstallerType,
               nestedInstallerPath: item.nestedInstallerPath,
-              silentSwitches: extractSilentSwitches(item.installCommand, item.installerType),
+              // Use the normalized silent switches carried on the cart item.
+              // Do NOT re-derive them from installCommand — that drops bare
+              // KEY=VALUE switches like ACCEPT_EULA=1 (UPSTREAM-ISSUES.md #2).
+              // Fallback covers carts persisted before silentArgs existed.
+              silentSwitches: item.silentArgs || extractSilentSwitches(item.installCommand, item.installerType),
               uninstallCommand: item.uninstallCommand,
               callbackUrl,
               psadtConfig: item.psadtConfig ? JSON.stringify(item.psadtConfig) : undefined,

@@ -15,7 +15,8 @@ import {
 import { getAppConfig } from '@/lib/config';
 import { buildIntuneAppDescription } from '@/lib/intune-description';
 import { verifyTenantConsent } from '@/lib/msp/consent-verification';
-import { extractSilentSwitches } from '@/lib/msp/silent-switches';
+import { getDefaultSilentArgs } from '@/lib/detection-rules';
+import type { WingetInstallerType } from '@/types/winget';
 import { queueWebhookDelivery } from '@/lib/msp/webhook-service';
 import { createAuditLog } from '@/lib/audit-logger';
 
@@ -567,7 +568,7 @@ async function lookupInstallerDetails(
       installer_url: data.installer_url,
       installer_sha256: data.installer_sha256 || '',
       installer_type: type,
-      silent_args: extractSilentSwitches('', type),
+      silent_args: getDefaultSilentArgs(type as WingetInstallerType),
       installer_scope: data.installer_scope || 'machine',
     };
   }
@@ -587,7 +588,7 @@ async function lookupInstallerDetails(
         installer_type: type,
         silent_args: typeof preferred.silent_args === 'string'
           ? preferred.silent_args
-          : extractSilentSwitches('', type),
+          : getDefaultSilentArgs(type as WingetInstallerType),
         installer_scope: typeof preferred.scope === 'string' ? preferred.scope : 'machine',
       };
     }
