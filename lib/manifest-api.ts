@@ -694,10 +694,18 @@ export async function getBestInstaller(
   const priority = archPriority[preferredArch] || archPriority.x64;
 
   for (const arch of priority) {
-    const installer = installers.find((i) => i.architecture === arch);
-    if (installer) {
-      return installer;
+    const matches = installers.filter((i) => i.architecture === arch);
+    if (matches.length === 0) {
+      continue;
     }
+    // Winget frequently splits one arch across several installer nodes and only
+    // carries the ProductCode (uninstall-registry key) on some of them — e.g.
+    // 7-Zip lists ARP DisplayName nodes before the MSI ProductCode node. Native
+    // detection (generateUninstallRegistryDetectionRules) keys on that code, so
+    // prefer a node that actually has one; otherwise it falls back to guessing a
+    // folder name. Only when no matching node carries a ProductCode do we take
+    // the first match.
+    return matches.find((i) => i.productCode?.trim()) ?? matches[0];
   }
 
   return installers[0];
