@@ -96,8 +96,14 @@ export function generateDetectionRules(
  * For user scope: HKCU:\SOFTWARE\IntuneGet\Apps\{WingetId_sanitized}
  * The SOFTWARE\IntuneGet\Apps root is customizable per package via
  * psadtConfig.registryMarkerPath (issue #106)
+ *
+ * Exported for custom apps (lib/custom-app.ts): a user-supplied installer URL
+ * carries no winget ProductCode and is always installed via PSADT, so the
+ * marker is the correct detection for it — it must bypass the native-first
+ * hierarchy in generateDetectionRules (which would otherwise fall through to a
+ * folder guess). Winget-catalog apps still go through generateDetectionRules.
  */
-function generateRegistryMarkerDetectionRules(
+export function generateRegistryMarkerDetectionRules(
   wingetId: string,
   version: string,
   scope?: WingetScope,

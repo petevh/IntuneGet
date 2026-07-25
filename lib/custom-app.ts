@@ -11,7 +11,7 @@
  */
 
 import {
-  generateDetectionRules,
+  generateRegistryMarkerDetectionRules,
   generateInstallCommand,
   generateUninstallCommand,
   resolveSilentArgs,
@@ -135,7 +135,16 @@ export function buildCustomAppCartItem(input: CustomAppInput): CustomAppCartItem
     silentArgs: input.silentSwitches?.trim() || CUSTOM_SILENT_SWITCH_DEFAULTS[input.installerType],
   };
 
-  const detectionRules = generateDetectionRules(installer, displayName, wingetId, version);
+  // Custom apps carry no winget ProductCode and are always installed via PSADT,
+  // so the IntuneGet registry marker is their correct detection. Call it directly
+  // rather than generateDetectionRules, whose native-first hierarchy would find
+  // no ProductCode and fall through to a folder-name guess (see the function's
+  // doc comment). Uses the default marker root (DEFAULT_PSADT_CONFIG below).
+  const detectionRules = generateRegistryMarkerDetectionRules(
+    wingetId,
+    version,
+    input.installScope
+  );
 
   return {
     appSource: 'win32',
