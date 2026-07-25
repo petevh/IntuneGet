@@ -457,11 +457,13 @@ export class JobProcessor {
    *
    * Deliberately derived from job.detection_rules rather than a separate
    * "packaging method" flag: the web app (lib/detection-rules.ts) decides
-   * per-job whether detection needs the marker. Until that file is updated
-   * to prefer native detection (MSI product code / MSIX PFN / uninstall
-   * registry) over the marker, every job's detection_rules will still
-   * resolve to the marker rule, so this returns false for everything - the
-   * native path stays dormant with zero behavior change until then.
+   * per-job whether detection needs the marker. As of the native-first
+   * detection rewrite (f503777aa), winget-catalog apps resolve to an
+   * uninstall-registry or file/folder rule and go native; custom
+   * (installer-URL) apps still resolve to the marker rule (bb2f16d3d) and
+   * stay on PSADT. This function doesn't need to know which rule shape it's
+   * looking at - it only checks whether the marker keyPath specifically is
+   * present, so it's correct for either outcome without change.
    *
    * zip is always PSADT: the native build path has no nested-installer
    * extraction (that capability was intentionally dropped, see

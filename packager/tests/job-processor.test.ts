@@ -99,6 +99,43 @@ describe('usesNativeBuild', () => {
     });
     expect(processor().usesNativeBuild(job)).toBe(false);
   });
+
+  it('goes native for the post-native-first uninstall-registry rule (same type as the marker, different keyPath)', () => {
+    // Regression test for the web-app native-first rewrite (f503777aa):
+    // winget-catalog apps with a ProductCode now key detection off the
+    // uninstall-registry key (e.g. Adobe Acrobat Reader) instead of the
+    // IntuneGet marker. That rule is ALSO `type: 'registry'`, so this pins
+    // that isMarkerDetectionRule distinguishes on keyPath, not just type -
+    // a type-only check would misclassify this as the marker and wrongly
+    // stay on PSADT.
+    const job = makeJob({
+      installer_type: 'burn',
+      detection_rules: [
+        {
+          type: 'registry',
+          keyPath:
+            'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{AC76BA86-1033-FF00-7760-BC15014EA700}',
+          detectionType: 'exists',
+        },
+      ],
+    });
+    expect(processor().usesNativeBuild(job)).toBe(true);
+  });
+
+  it('goes native for a folder-existence rule (no ProductCode available)', () => {
+    const job = makeJob({
+      installer_type: 'nullsoft',
+      detection_rules: [
+        {
+          type: 'file',
+          path: '%ProgramFiles%',
+          fileOrFolderName: 'Some App',
+          detectionType: 'exists',
+        },
+      ],
+    });
+    expect(processor().usesNativeBuild(job)).toBe(true);
+  });
 });
 
 describe('buildNativeCommandLines', () => {
