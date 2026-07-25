@@ -171,6 +171,48 @@ describe('buildNativeCommandLines', () => {
     expect(result.uninstall).toBe('msiexec /x "app.msi" /qn /norestart');
   });
 
+  it('uses a direct msiexec uninstall for an exe installer that wraps an MSI, when detection knows the ProductCode', () => {
+    // Regression test for a live failure: Adobe Acrobat Reader's manifest
+    // declares installer_type "exe" (it's a bootstrapper) but also a real MSI
+    // ProductCode. Native-first detection already resolved that ProductCode
+    // into an uninstall-registry rule; buildNativeCommandLines previously only
+    // checked installer_type for "msi"/"wix" and ignored it, so it fell to the
+    // generic Uninstall.ps1 script - which for this app would have run the
+    // wrong msiexec verb (the registered UninstallString uses /I, not /X) with
+    // mismatched exe-install switches appended, and not actually uninstalled it.
+    const job = makeJob({
+      installer_type: 'exe',
+      install_command: '"AcroRdrDCx64.exe" /sAll /msi EULA_ACCEPT=YES',
+      uninstall_command: 'REGISTRY_UNINSTALL:Adobe Acrobat Reader (64-bit)',
+      detection_rules: [
+        {
+          type: 'registry',
+          keyPath:
+            'HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{AC76BA86-1033-FF00-7760-BC15014EA700}',
+          detectionType: 'exists',
+        },
+      ],
+    });
+    const result = processor().buildNativeCommandLines(job, 'AcroRdrDCx64.exe');
+
+    expect(result.install).toBe('"AcroRdrDCx64.exe" /sAll /msi EULA_ACCEPT=YES');
+    expect(result.uninstall).toBe('msiexec /x {AC76BA86-1033-FF00-7760-BC15014EA700} /qn /norestart');
+    expect(result.uninstallScript).toBeNull();
+  });
+
+  it('still falls back to the generic Uninstall.ps1 script for a non-MSI exe with no ProductCode anywhere', () => {
+    const job = makeJob({
+      installer_type: 'nullsoft',
+      detection_rules: [
+        { type: 'file', path: '%ProgramFiles%', fileOrFolderName: 'Some App', detectionType: 'exists' },
+      ],
+    });
+    const result = processor().buildNativeCommandLines(job, '7zip-setup.exe');
+
+    expect(result.uninstall).toBe('powershell.exe -ExecutionPolicy Bypass -File Uninstall.ps1');
+    expect(result.uninstallScript).not.toBeNull();
+  });
+
   it('uses winget real switches (not a per-type guess) when install_command carries them', () => {
     // Regression test for a live failure: SSMS's real switches are
     // `--quiet --wait --campaign <id>` (installer_type not recognized as a

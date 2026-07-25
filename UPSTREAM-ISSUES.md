@@ -381,4 +381,49 @@ treating the marker as a literal command.
 
 ---
 
+## 5. Native build path ignores a known ProductCode for exe installers that wrap an MSI
+
+**Date:** 2026-07-25
+**Severity:** High (uninstall silently does the wrong thing instead of removing the app)
+**Fork fix:** `packager/src/job-processor.ts` — `buildNativeCommandLines` /
+`getProductCodeFromDetectionRules`
+
+### Symptom
+Adobe Acrobat Reader, packaged via the native `IntuneWin32App` path (once
+issue #3's fix let its detection resolve to a real uninstall-registry rule
+instead of a marker), still gets a generic `Uninstall.ps1` uninstall command
+instead of a direct `msiexec /x {ProductCode}`. On this specific app that
+script would likely not even work: its real registry `UninstallString` is
+`MsiExec.exe /I{AC76BA86-1033-FF00-7760-BC15014EA700}` (the `/I` repair verb,
+not `/X` uninstall) with no `QuietUninstallString` set, and the script would
+append Acrobat's *install* switches (e.g. `/sAll /msi EULA_ACCEPT=YES`) to
+that `/I` command — neither the verb nor the switches are correct for an
+uninstall.
+
+### Root cause
+`buildNativeCommandLines` only builds a direct `msiexec /x` uninstall when
+`job.installer_type` is literally `msi`/`wix`. Winget classifies Acrobat's
+installer as `exe` (it's Adobe's bootstrapper), even though the manifest
+declares a real MSI `ProductCode` and native-first detection already
+resolved it into `job.detection_rules`' uninstall-registry rule (issue #3).
+The uninstall-command builder never looks at `job.detection_rules` at all —
+it falls straight to the generic `Uninstall.ps1` fallback (registry lookup
+by `DisplayName`, same technique for every non-MSI installer) whenever
+`installer_type` isn't `msi`/`wix`, even when a `ProductCode` is right there
+in the detection rule.
+
+This only affects **uninstall**: install still correctly runs the exe
+bootstrapper regardless (`msiexec` can't install from a bare `.exe`).
+
+### Fix
+Added `getProductCodeFromDetectionRules(job)`, which extracts the GUID from
+`job.detection_rules`' uninstall-registry `keyPath` when present.
+`buildNativeCommandLines` now takes a direct `msiexec /x {ProductCode}`
+uninstall whenever a `ProductCode` is known this way — regardless of
+`installer_type` — falling back to the generic script only when neither
+`installer_type` nor detection knows one (genuine non-MSI installers like
+Inno/NSIS).
+
+---
+
 <!-- Add further issues below in the same format. -->

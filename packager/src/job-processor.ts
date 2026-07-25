@@ -528,18 +528,31 @@ export class JobProcessor {
       return { install, uninstall: uninstallOverride, setupFilePath: installerFileName, uninstallScript: null };
     }
 
-    if (isMsi) {
-      const productCodeMatch = job.uninstall_command.match(
-        /\{[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\}/
-      );
-      const uninstall = productCodeMatch
-        ? `msiexec /x ${productCodeMatch[0]} /qn /norestart`
+    // Prefer a direct msiexec uninstall whenever an MSI ProductCode is known
+    // - either job.installer_type says msi/wix, or native-first detection
+    // (job.detection_rules) already resolved one from the uninstall-registry
+    // key. The latter covers installers winget classifies as exe/burn that
+    // actually wrap an MSI underneath (e.g. Adobe Acrobat Reader: installer_type
+    // is exe, but its manifest carries a ProductCode and detection keys off
+    // the uninstall-registry entry for it). Install still has to run the exe
+    // bootstrapper - msiexec can't install from a bare .exe - but uninstall
+    // doesn't need the original installer at all, so it can always go
+    // straight through msiexec once a ProductCode is known.
+    const productCode = isMsi
+      ? job.uninstall_command.match(
+          /\{[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\}/
+        )?.[0] ?? this.getProductCodeFromDetectionRules(job)
+      : this.getProductCodeFromDetectionRules(job);
+
+    if (isMsi || productCode) {
+      const uninstall = productCode
+        ? `msiexec /x ${productCode} /qn /norestart`
         : `msiexec /x "${installerFileName}" /qn /norestart`;
       return { install, uninstall, setupFilePath: installerFileName, uninstallScript: null };
     }
 
-    // No PSADT and no MSI product code: uninstall has to be resolved at
-    // runtime from the standard Windows Uninstall registry key by display
+    // No PSADT and no known MSI product code: uninstall has to be resolved
+    // at runtime from the standard Windows Uninstall registry key by display
     // name, same technique PSADT's Uninstall-ADTApplication uses internally.
     return {
       install,
@@ -547,6 +560,33 @@ export class JobProcessor {
       setupFilePath: installerFileName,
       uninstallScript: this.generateNativeUninstallScript(job, silentArgs),
     };
+  }
+
+  /**
+   * Extract an MSI ProductCode GUID from job.detection_rules' uninstall-
+   * registry rule, when present. Native-first detection already resolved
+   * this (see lib/detection-rules.ts generateUninstallRegistryDetectionRules)
+   * for any installer with a manifest ProductCode, regardless of what
+   * installer_type says - reuse it here instead of only trusting
+   * installer_type for the uninstall command.
+   */
+  private getProductCodeFromDetectionRules(job: PackagingJob): string | undefined {
+    if (!Array.isArray(job.detection_rules)) {
+      return undefined;
+    }
+    for (const rule of job.detection_rules) {
+      const r = rule as Record<string, unknown>;
+      if (r.type !== 'registry' || typeof r.keyPath !== 'string') {
+        continue;
+      }
+      const match = r.keyPath.match(
+        /Uninstall\\(\{[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\})$/
+      );
+      if (match) {
+        return match[1];
+      }
+    }
+    return undefined;
   }
 
   /**
