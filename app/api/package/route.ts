@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { createServerClient } from '@/lib/supabase';
+import { createServerClient, isSupabaseConfigured } from '@/lib/supabase';
 import { getDatabase } from '@/lib/db';
 import {
   isGitHubActionsConfigured,
@@ -74,17 +74,29 @@ export async function POST(request: NextRequest) {
     const tokenTenantId = user.tenantId;
 
     // Check for MSP tenant override header and enforce tenant access checks
-    // (membership, managed tenant consent, and customer-only access mode)
+    // (membership, managed tenant consent, and customer-only access mode).
+    //
+    // MSP tenant resolution is Supabase-backed (memberships/managed tenants). On
+    // a self-hosted instance without Supabase there is no MSP org and no other
+    // tenant to target, so skip it and deploy to the token's own tenant.
+    // createServerClient() THROWS when Supabase is unconfigured, so it must only
+    // be called when configured — otherwise the whole deploy route 500s in
+    // self-hosted sqlite mode (regression from a483ded38, see UPSTREAM-ISSUES.md).
     const mspTenantId = request.headers.get('X-MSP-Tenant-Id');
-    const { tenantId, errorResponse: tenantError } = await resolveTargetTenantId({
-      supabase: createServerClient(),
-      userId,
-      tokenTenantId,
-      requestedTenantId: mspTenantId,
-    });
-
-    if (tenantError) {
-      return tenantError;
+    let tenantId: string;
+    if (isSupabaseConfigured()) {
+      const resolved = await resolveTargetTenantId({
+        supabase: createServerClient(),
+        userId,
+        tokenTenantId,
+        requestedTenantId: mspTenantId,
+      });
+      if (resolved.errorResponse) {
+        return resolved.errorResponse;
+      }
+      tenantId = resolved.tenantId;
+    } else {
+      tenantId = tokenTenantId;
     }
 
     // Verify admin consent for the target tenant before accepting jobs
@@ -581,7 +593,8 @@ export async function POST(request: NextRequest) {
             ? `${storeDeployed} Store app(s) deployed successfully`
             : `${win32Queued} job(s) queued successfully`,
     });
-  } catch {
+  } catch (error) {
+    console.error('[POST /api/package] deployment failed:', error);
     return NextResponse.json(
       { error: 'Internal server error' },
       { status: 500 }

@@ -71,6 +71,10 @@ vi.mock('@/lib/installer-preflight', async (importOriginal) => {
 
 vi.mock('@/lib/supabase', () => ({
   createServerClient: vi.fn(),
+  // Default: Supabase-configured (hosted/MSP) so the existing cases exercise the
+  // resolveTargetTenantId path. The self-hosted no-Supabase path is covered in
+  // its own test below, which overrides this to false.
+  isSupabaseConfigured: vi.fn(() => true),
 }));
 
 vi.mock('@/lib/msp/tenant-resolution', () => ({
@@ -90,6 +94,8 @@ vi.mock('@/lib/store-app-deploy', () => ({
 
 import { GET, POST } from '@/app/api/package/route';
 import { InstallerPreflightError } from '@/lib/installer-preflight';
+import { isSupabaseConfigured } from '@/lib/supabase';
+import { resolveTargetTenantId } from '@/lib/msp/tenant-resolution';
 
 function makeJob(overrides: Partial<PackagingJob>): PackagingJob {
   const now = new Date().toISOString();
@@ -353,6 +359,29 @@ describe('POST /api/package (workflow dispatch)', () => {
         hashValidationMode: 'calculate',
       })
     );
+  });
+
+  it('deploys in self-hosted mode without Supabase (does not call MSP tenant resolution)', async () => {
+    // Regression for the introduced-by-a483ded38 bug: the route called
+    // createServerClient() unconditionally to feed resolveTargetTenantId, and
+    // createServerClient() throws when Supabase is unconfigured — 500ing every
+    // deploy on self-hosted sqlite instances. With no Supabase and no MSP header,
+    // the deploy must use the token's own tenant and skip resolution entirely.
+    vi.mocked(isSupabaseConfigured).mockReturnValueOnce(false);
+
+    const request = new NextRequest('http://localhost:3000/api/package', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ items: [makeWin32Item()] }),
+    });
+
+    const response = await POST(request);
+
+    expect(response.status).toBe(200);
+    expect(resolveTargetTenantId).not.toHaveBeenCalled();
   });
 
   it('treats a whitespace-only custom-app SHA256 as missing', async () => {

@@ -381,7 +381,69 @@ treating the marker as a literal command.
 
 ---
 
-## 5. Native build path ignores a known ProductCode for exe installers that wrap an MSI
+## 5. Deploy route hard-depends on Supabase, 500s every deploy on self-hosted sqlite
+
+### Symptom
+On a self-hosted instance running in SQLite mode (no Supabase configured),
+**every** deployment fails with a generic toast "Deployment could not be
+started / Internal server error." The web app itself is healthy; only
+`POST /api/package` fails, and it fails identically for every app, before any
+packaging work happens. Nothing appears in the server logs.
+
+### Root cause
+`app/api/package/route.ts` calls `createServerClient()` **unconditionally** to
+feed MSP tenant resolution:
+
+```ts
+const { tenantId, errorResponse } = await resolveTargetTenantId({
+  supabase: createServerClient(),   // <-- throws when Supabase is unconfigured
+  ...
+});
+```
+
+`createServerClient()` (`lib/supabase.ts`) throws `'Supabase URL and service role
+key are required for server-side operations'` when the Supabase env vars are
+absent. So on any self-hosted sqlite deployment the call throws on the very first
+step of the handler. The exception was then swallowed by a bare `catch {}` that
+returned `{ error: 'Internal server error' }` with no logging — hence the silent
+500 with nothing in the logs.
+
+MSP tenant resolution is only meaningful with Supabase (it reads
+`msp_user_memberships` / `msp_managed_tenants`). A single-tenant self-hosted
+instance has no MSP org and no other tenant to target, so the whole path should
+be skipped — the deploy targets the token's own tenant. Note the sibling route
+`app/api/updates/trigger/route.ts` already guards this exact call with
+`isSupabaseConfigured()`; `/api/package` simply missed the guard.
+
+### Introduced
+Upstream commit `a483ded38` "Add MSP customer-only members (#122) and
+tenant-wide duplicate detection (#127)" (2026-07-02). NOT present in the `v0.7.1`
+release tag, so self-hosted instances pinned to v0.7.1 were unaffected; it only
+bites once you build past that tag.
+
+### Reproduction for upstream
+1. Run the app with `DATABASE_MODE=sqlite` and no `NEXT_PUBLIC_SUPABASE_URL` /
+   `SUPABASE_SERVICE_ROLE_KEY`.
+2. Sign in, add any app to the cart, click Deploy.
+3. `POST /api/package` returns 500 `{ error: 'Internal server error' }`.
+
+### Fix (this fork)
+Guard the MSP path with `isSupabaseConfigured()`: only call `createServerClient()`
+/ `resolveTargetTenantId` when Supabase is configured, otherwise use
+`tokenTenantId` directly. Also gave the swallowing `catch {}` a `console.error`
+so future 500s aren't silent. Regression test added
+(`app/api/package/route.test.ts`, "deploys in self-hosted mode without Supabase").
+
+### The pattern
+This is the recurring self-hosting hazard: a feature developed for the hosted
+(Supabase/Vercel) topology quietly assumes that backend exists on a code path
+that also runs self-hosted. Same class as the DESIGN.md §6 traps. Worth auditing
+the other `createServerClient()` call sites (there are ~18) for the same
+unconditional-throw pattern on request paths that must work without Supabase.
+
+---
+
+## 6. Native build path ignores a known ProductCode for exe installers that wrap an MSI
 
 **Date:** 2026-07-25
 **Severity:** High (uninstall silently does the wrong thing instead of removing the app)
