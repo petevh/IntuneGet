@@ -311,4 +311,74 @@ top-level defaults in `normalizeInstallers`, and merge it the same way:
 
 ---
 
+## 4. Self-hosted packager never resolves the `REGISTRY_UNINSTALL:`/`MSIX_UNINSTALL:` markers
+
+**Date:** 2026-07-25
+**Severity:** High (uninstall of the app fails outright on the device)
+**Fork fix:** `packager/src/job-processor.ts` — `getUninstallCommand`
+**Affected files (upstream/main only — the GitHub Actions pipeline already
+gets this right, the self-hosted packager is the one missing it):**
+- `packager/src/job-processor.ts:1074` — `getUninstallCommand`
+- Reference implementation that already works: `.github/scripts/Create-PSADTPackage.ps1:437-1271`
+
+### Symptom
+Uninstalling `Adobe.Acrobat.Reader.64-bit` (packaged via the self-hosted
+packager's PSADT path) fails immediately. PSADT's own uninstall log shows
+the literal command that ran:
+
+```
+Executing ["C:\Windows\System32\cmd.exe" /c REGISTRY_UNINSTALL:Adobe Acrobat Reader (64-bit)]...
+Execution failed with exit code [1].
+```
+
+The webapp's package-config screen shows this same string, greyed out, as
+the computed uninstall command — it's the correct default from the web
+app's perspective, not a mistake there.
+
+### Root cause
+`lib/detection-rules.ts`'s `generateUninstallCommand` deliberately returns a
+**marker string**, not a literal command, for any exe/inno/nullsoft/burn
+installer (`REGISTRY_UNINSTALL:<displayName>`) or msix/appx installer
+(`MSIX_UNINSTALL:<name>`):
+
+```ts
+// Returns a marker that tells Create-PSADTPackage.ps1 to use
+// Uninstall-ADTApplication with the display name.
+function generateRegistryUninstallCommand(displayName, _installerType) {
+  return `REGISTRY_UNINSTALL:${displayName}`;
+}
+```
+
+`.github/scripts/Create-PSADTPackage.ps1` (the original GitHub Actions
+packaging pipeline) correctly detects and expands both markers into real
+PSADT v4 code (`Get-ADTApplication -Name` / `Uninstall-ADTApplication -Name`,
+with a `winget uninstall --id` fallback; `Get-AppxPackage` /
+`Remove-AppxPackage` for MSIX). The self-hosted `packager/` is a separate,
+newer reimplementation of PSADT deploy-script generation that never carried
+this logic over — `getUninstallCommand` only special-cases a `psadtConfig`
+override or a literal MSI GUID found in the string; everything else,
+including these markers, falls through to being wrapped verbatim in
+`Start-ADTProcess -FilePath cmd.exe -ArgumentList '/c <raw string>'`, so the
+marker text itself gets shelled out as if it were a program name.
+
+This is not Acrobat-specific: **every PSADT-built exe/inno/nullsoft/burn or
+msix/appx app's uninstall is broken** on the self-hosted packager unless it
+happens to have a `psadtConfig` uninstall override or a literal GUID
+embedded in `uninstall_command`.
+
+### Reproduction for upstream
+1. Package any exe/inno/nullsoft/burn winget app through the self-hosted
+   packager's PSADT path (e.g. `Adobe.Acrobat.Reader.64-bit`).
+2. Trigger an uninstall from Intune.
+3. PSADT's uninstall log shows `cmd.exe /c REGISTRY_UNINSTALL:<name>` failing
+   with exit code 1 instead of actually removing the app.
+
+### Fix
+Port `Create-PSADTPackage.ps1`'s marker-resolution logic into
+`getUninstallCommand`: detect the `REGISTRY_UNINSTALL:`/`MSIX_UNINSTALL:`
+prefixes and emit the equivalent PSADT v4 / `Get-AppxPackage` code instead of
+treating the marker as a literal command.
+
+---
+
 <!-- Add further issues below in the same format. -->

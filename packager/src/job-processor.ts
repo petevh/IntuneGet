@@ -1082,6 +1082,23 @@ ${steps}
       return "Write-ADTLogEntry -Message 'No uninstall command specified' -Severity 'Warning' -Source 'Uninstall-ADTDeployment'";
     }
 
+    // job.uninstall_command can be a marker string, not a literal command -
+    // lib/detection-rules.ts's generateUninstallCommand emits REGISTRY_UNINSTALL:
+    // for exe/inno/nullsoft/burn (and MSIX_UNINSTALL: for msix/appx) instructing
+    // the packaging pipeline to resolve the real uninstall at deploy-script-build
+    // time. .github/scripts/Create-PSADTPackage.ps1 already implements this;
+    // ported here so the self-hosted packager doesn't just shell out to the
+    // literal marker text (which fails - see UPSTREAM-ISSUES.md).
+    const registryMarkerMatch = job.uninstall_command.match(/^REGISTRY_UNINSTALL:(.+)$/);
+    if (registryMarkerMatch) {
+      return this.getRegistryUninstallCommand(job, registryMarkerMatch[1]);
+    }
+
+    const msixMarkerMatch = job.uninstall_command.match(/^MSIX_UNINSTALL:(.+)$/);
+    if (msixMarkerMatch) {
+      return this.getMsixUninstallCommand(msixMarkerMatch[1]);
+    }
+
     // MSI uninstall: use the product code with Start-ADTMsiProcess
     const productCodeMatch = job.uninstall_command.match(
       /\{[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}\}/
@@ -1092,6 +1109,92 @@ ${steps}
 
     const uninstallCmd = job.uninstall_command.replace(/'/g, "''");
     return `Start-ADTProcess -FilePath "$env:SystemRoot\\System32\\cmd.exe" -ArgumentList '/c ${uninstallCmd}' -WindowStyle Hidden`;
+  }
+
+  /**
+   * Resolve a REGISTRY_UNINSTALL:<displayName> marker into real PSADT v4 code:
+   * find the app by its Add/Remove Programs display name and uninstall it via
+   * Get-ADTApplication/Uninstall-ADTApplication (handles MSI vs EXE detection
+   * and QuietUninstallString automatically), falling back to
+   * `winget uninstall --id` if it can't be found by name. Mirrors
+   * Create-PSADTPackage.ps1's REGISTRY_UNINSTALL handling.
+   */
+  private getRegistryUninstallCommand(job: PackagingJob, rawDisplayName: string): string {
+    // Strip winget-catalog suffixes that don't appear in the actual ARP
+    // DisplayName (e.g. winget lists "Adobe Acrobat Reader (64-bit)" but the
+    // registry entry is just "Adobe Acrobat (64-bit)").
+    const suffixesToStrip = [
+      /\s*\(Install\)$/,
+      /\s*\(Machine-Wide Install\)$/,
+      /\s*\(Machine Wide Install\)$/,
+      /\s*\(User\)$/,
+      /\s*\(x64\)$/,
+      /\s*\(x86\)$/,
+      /\s*\(64-bit\)$/,
+      /\s*\(32-bit\)$/,
+    ];
+    let appName = rawDisplayName.trim();
+    for (const suffix of suffixesToStrip) {
+      appName = appName.replace(suffix, '');
+    }
+    appName = appName.trim().replace(/'/g, "''");
+    const wingetId = job.winget_id.replace(/'/g, "''");
+
+    return `$appName = '${appName}'
+    $wingetId = '${wingetId}'
+
+    Write-ADTLogEntry -Message "Searching for installed application: $appName" -Source 'Uninstall-ADTDeployment'
+    $installedApp = Get-ADTApplication -Name $appName
+
+    if ($installedApp) {
+        Write-ADTLogEntry -Message "Found via registry name, uninstalling..." -Source 'Uninstall-ADTDeployment'
+        Uninstall-ADTApplication -Name $appName -SuccessExitCodes @(0, 1605, 1614) -RebootExitCodes @(1641, 3010)
+    } else {
+        Write-ADTLogEntry -Message "Not found by name '$appName', falling back to winget uninstall --id $wingetId" -Severity 'Warning' -Source 'Uninstall-ADTDeployment'
+
+        $wingetExe = Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+        if (-not $wingetExe) {
+            $wingetExe = Get-ChildItem "C:\\Program Files\\WindowsApps\\Microsoft.DesktopAppInstaller_*_*__8wekyb3d8bbwe\\winget.exe" -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+        }
+
+        if ($wingetExe) {
+            Start-ADTProcess -FilePath $wingetExe -ArgumentList "uninstall --id $wingetId --silent --accept-source-agreements --disable-interactivity" -WindowStyle Hidden -SuccessExitCodes @(0)
+        } else {
+            throw "Could not find installed application: $appName (winget not available for fallback)"
+        }
+    }`;
+  }
+
+  /**
+   * Resolve an MSIX_UNINSTALL:<packageName> marker into real PSADT v4 code:
+   * remove the provisioned package and any installed instances by
+   * package-family-name prefix. Mirrors Create-PSADTPackage.ps1's
+   * MSIX_UNINSTALL handling.
+   */
+  private getMsixUninstallCommand(rawPackageName: string): string {
+    const packageName = rawPackageName.trim().replace(/'/g, "''");
+
+    return `$packageName = '${packageName}'
+    Write-ADTLogEntry -Message "Removing MSIX package: $packageName" -Severity 'Info' -Source 'Uninstall-ADTDeployment'
+    try {
+        $provPackage = Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -like "*$packageName*" }
+        if ($provPackage) {
+            Write-ADTLogEntry -Message "Removing provisioned package: $($provPackage.DisplayName)" -Severity 'Info' -Source 'Uninstall-ADTDeployment'
+            $provPackage | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue
+        }
+        $packages = Get-AppxPackage -Name "*$packageName*" -AllUsers -ErrorAction SilentlyContinue
+        if ($packages) {
+            foreach ($pkg in $packages) {
+                Write-ADTLogEntry -Message "Removing installed package: $($pkg.PackageFullName)" -Severity 'Info' -Source 'Uninstall-ADTDeployment'
+                Remove-AppxPackage -Package $pkg.PackageFullName -AllUsers -ErrorAction SilentlyContinue
+            }
+        }
+        Write-ADTLogEntry -Message "MSIX package removal completed" -Severity 'Success' -Source 'Uninstall-ADTDeployment'
+    } catch {
+        Write-ADTLogEntry -Message "Failed to remove MSIX package: $_" -Severity 'Error' -Source 'Uninstall-ADTDeployment'
+        throw
+    }`;
   }
 
   /**

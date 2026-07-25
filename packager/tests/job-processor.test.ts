@@ -53,6 +53,7 @@ function processor() {
       installerFileName: string
     ): { install: string; uninstall: string; setupFilePath: string; uninstallScript: string | null };
     extractSilentSwitches(installCommand: string, installerType: string): string;
+    getUninstallCommand(job: PackagingJob): string;
   };
 }
 
@@ -259,5 +260,63 @@ describe('extractSilentSwitches', () => {
       'exe'
     );
     expect(result).toBe('/S');
+  });
+});
+
+describe('getUninstallCommand (REGISTRY_UNINSTALL / MSIX_UNINSTALL markers)', () => {
+  // Regression tests for a live failure: lib/detection-rules.ts (web app)
+  // emits REGISTRY_UNINSTALL:<displayName> / MSIX_UNINSTALL:<name> marker
+  // strings for exe/inno/nullsoft/burn and msix/appx installers respectively
+  // - not literal commands. .github/scripts/Create-PSADTPackage.ps1 already
+  // resolves these into real PSADT v4 calls; the self-hosted packager didn't,
+  // so it shelled out to the literal marker text via cmd.exe and failed with
+  // exit code 1 (confirmed live against Adobe Acrobat Reader's uninstall).
+
+  it('resolves REGISTRY_UNINSTALL into Get-ADTApplication/Uninstall-ADTApplication, stripping the winget suffix', () => {
+    const job = makeJob({
+      winget_id: 'Adobe.Acrobat.Reader.64-bit',
+      uninstall_command: 'REGISTRY_UNINSTALL:Adobe Acrobat Reader (64-bit)',
+    });
+    const result = processor().getUninstallCommand(job);
+
+    expect(result).not.toContain('REGISTRY_UNINSTALL');
+    expect(result).toContain("$appName = 'Adobe Acrobat Reader'");
+    expect(result).toContain('Get-ADTApplication -Name $appName');
+    expect(result).toContain('Uninstall-ADTApplication -Name $appName');
+    expect(result).toContain("$wingetId = 'Adobe.Acrobat.Reader.64-bit'");
+    expect(result).toContain('winget uninstall --id $wingetId');
+  });
+
+  it('resolves MSIX_UNINSTALL into Get-AppxPackage/Remove-AppxPackage', () => {
+    const job = makeJob({
+      installer_type: 'msix',
+      uninstall_command: 'MSIX_UNINSTALL:Contoso.App',
+    });
+    const result = processor().getUninstallCommand(job);
+
+    expect(result).not.toContain('MSIX_UNINSTALL');
+    expect(result).toContain("$packageName = 'Contoso.App'");
+    expect(result).toContain('Get-AppxPackage -Name "*$packageName*"');
+    expect(result).toContain('Remove-AppxPackage');
+  });
+
+  it('still prefers an MSI product code over any marker', () => {
+    const job = makeJob({
+      installer_type: 'msi',
+      uninstall_command: 'msiexec /x {11111111-2222-3333-4444-555555555555} /qn',
+    });
+    const result = processor().getUninstallCommand(job);
+
+    expect(result).toBe(
+      "Start-ADTMsiProcess -Action 'Uninstall' -ProductCode '{11111111-2222-3333-4444-555555555555}' -SuccessExitCodes @(0, 1605, 1614, 3010, 1641)"
+    );
+  });
+
+  it('still falls back to a literal command when uninstall_command is not a marker', () => {
+    const job = makeJob({ uninstall_command: '"C:\\Program Files\\App\\uninst.exe" /S' });
+    const result = processor().getUninstallCommand(job);
+
+    expect(result).toContain('Start-ADTProcess');
+    expect(result).toContain('uninst.exe');
   });
 });
