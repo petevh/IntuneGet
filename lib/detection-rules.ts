@@ -20,7 +20,7 @@ import { normalizeMarkerPath } from '@/lib/registry-marker';
 /**
  * Generate detection rules based on installer metadata.
  *
- * NATIVE-FIRST strategy (changed 2026-07-19 — see docker-homelab intuneget/DESIGN.md §2).
+ * NATIVE-FIRST strategy (changed 2026-07-19 — see docs/DESIGN.md §2).
  * The previous strategy preferred the IntuneGet registry marker
  * (`HKLM\SOFTWARE\IntuneGet\Apps\{id}`) for every installer type. That marker is written
  * only by the PSADT install script, so (a) it breaks entirely once packaging moves off
