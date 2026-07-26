@@ -537,4 +537,48 @@ detection re-check no longer races ahead of the real state.
 
 ---
 
+## 8. `extractSilentSwitches` duplicates the `msiexec /i "<path>"` prefix for MSI installers
+
+**Date:** 2026-07-26
+**Severity:** High (native-path MSI installs silently ship a malformed command line)
+**Fork fix:** `packager/src/job-processor.ts` — `extractSilentSwitches`
+
+### Symptom
+Confirmed live: `Google Chrome`, packaged via the native `IntuneWin32App`
+path, shipped with `InstallCommandLine`:
+```
+msiexec /i "googlechromestandaloneenterprise64.msi" /i "googlechromestandaloneenterprise64.msi" /qn ALLUSERS=1 /norestart
+```
+— `/i "<path>"` appears twice.
+
+### Root cause
+`job.install_command` for MSI packages is a **complete msiexec command
+line** (e.g. `msiexec /i "file.msi" /qn ALLUSERS=1 /norestart`), not
+`"<path>" <switches>` the way exe-family commands are shaped.
+`extractSilentSwitches` (rewritten in issue #2's fix, 2026-07-23) only
+stripped a single leading token — for this input that strips just the word
+`msiexec`, leaving `/i "file.msi" /qn ALLUSERS=1 /norestart` as the returned
+"switches". `buildNativeCommandLines`'s MSI branch then prepends its own
+`msiexec /i "<file>"` on top of that, producing the duplicate.
+
+The old (pre-issue-#2) regex-based extractor had a *different* bug for this
+same input: it matched only the first switch-shaped token (`/i`) and
+stopped at the following quoted path (which starts with `"`, not `/` or
+`-`), silently discarding every real switch including `ALLUSERS=1` — quieter
+than today's visible duplication, but the same underlying gap: neither
+implementation accounted for MSI commands having a `msiexec /i "<path>"`
+prefix instead of a bare leading path.
+
+### Fix
+Added an MSI-shaped-command branch to `extractSilentSwitches` that matches
+`^msiexec(\.exe)?\s+/i\s+(?:"[^"]+"|\S+)\s*(.*)$` and returns just the
+trailing switches, before falling through to the generic single-token-strip
+logic used for exe-family commands. Fixes both call sites that share this
+function: the native path (was producing the literal duplicate) and the
+PSADT path's `extractMsiProperties` (was leaking the quoted filename token
+into `-AdditionalArgumentList` for any MSI package with real properties,
+since its flag-only filter never matched a stray filename token either).
+
+---
+
 <!-- Add further issues below in the same format. -->

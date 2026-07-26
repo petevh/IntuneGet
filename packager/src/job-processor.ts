@@ -1394,6 +1394,24 @@ ${steps}
     // (web app, detection-rules.ts) always quotes the installer path, so this
     // input doesn't occur in practice - see UPSTREAM-ISSUES.md #2 discussion.
     const trimmed = installCommand.trim();
+
+    // MSI-style commands have a different shape entirely: `msiexec /i "path.msi"
+    // <switches>`, not `"path" <switches>`. The single-leading-token strip below
+    // only removes the word "msiexec", leaving `/i "path.msi"` embedded in what
+    // gets treated as switches - callers that independently prepend their own
+    // `msiexec /i "file"` (buildNativeCommandLines) then end up with the
+    // installer reference duplicated. Confirmed live: Chrome's native install
+    // command shipped as `msiexec /i "googlechromestandaloneenterprise64.msi"
+    // /i "googlechromestandaloneenterprise64.msi" /qn ALLUSERS=1 /norestart`.
+    const msiMatch = trimmed.match(/^msiexec(?:\.exe)?\s+\/i\s+(?:"[^"]+"|\S+)\s*(.*)$/i);
+    if (msiMatch) {
+      const rest = msiMatch[1].trim();
+      if (rest && !rest.startsWith('-DeploymentType')) {
+        return rest;
+      }
+      return defaultSilentArgs(installerType) ?? '/qn /norestart';
+    }
+
     const leadingToken = trimmed.match(/^"[^"]+"|^\S+/)?.[0] ?? '';
     const looksLikeSwitch = /^[/-]/.test(leadingToken);
     const switches = looksLikeSwitch ? trimmed : trimmed.slice(leadingToken.length).trim();

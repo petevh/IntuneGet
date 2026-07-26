@@ -240,6 +240,26 @@ describe('buildNativeCommandLines', () => {
     expect(result.install).toBe('"vs_SSMS.exe" --quiet --wait --campaign 8f2c1e-some-campaign-id');
   });
 
+  it('does not duplicate the msiexec /i installer reference for MSI installers (Chrome)', () => {
+    // Regression test for a live failure: job.install_command for MSI packages
+    // is a full msiexec command line (e.g. from winget's Google Chrome
+    // manifest), not just "<path> <switches>" like exe-family commands.
+    // extractSilentSwitches only stripped the single leading token ("msiexec"),
+    // leaving `/i "file.msi"` embedded in what it returned as switches -
+    // buildNativeCommandLines then prepended its own `msiexec /i "file"` on
+    // top, producing a literal duplicate installer reference:
+    // `msiexec /i "x.msi" /i "x.msi" /qn ALLUSERS=1 /norestart`.
+    const job = makeJob({
+      installer_type: 'msi',
+      install_command: 'msiexec /i "googlechromestandaloneenterprise64.msi" /qn ALLUSERS=1 /norestart',
+    });
+    const result = processor().buildNativeCommandLines(job, 'googlechromestandaloneenterprise64.msi');
+
+    expect(result.install).toBe(
+      'msiexec /i "googlechromestandaloneenterprise64.msi" /qn ALLUSERS=1 /norestart'
+    );
+  });
+
   it('falls back to the per-type default when install_command carries no separate switches', () => {
     const job = makeJob({ installer_type: 'burn', install_command: '"vs_SSMS.exe"' });
     const result = processor().buildNativeCommandLines(job, 'vs_SSMS.exe');
@@ -313,6 +333,29 @@ describe('extractSilentSwitches', () => {
       'exe'
     );
     expect(result).toBe('/S');
+  });
+
+  it('strips the full "msiexec /i <path>" prefix, not just the word "msiexec" (Chrome)', () => {
+    // Regression test: job.install_command for MSI packages is a complete
+    // msiexec command line, not "<path> <switches>". Stripping only the
+    // single leading token left `/i "file.msi"` in the returned switches,
+    // which duplicated the installer reference wherever a caller (native
+    // build path) also prepends its own `msiexec /i "file"`.
+    const result = processor().extractSilentSwitches(
+      'msiexec /i "googlechromestandaloneenterprise64.msi" /qn ALLUSERS=1 /norestart',
+      'msi'
+    );
+    expect(result).toBe('/qn ALLUSERS=1 /norestart');
+  });
+
+  it('handles an unquoted MSI path after /i', () => {
+    const result = processor().extractSilentSwitches('msiexec /i app.msi /qn /norestart', 'msi');
+    expect(result).toBe('/qn /norestart');
+  });
+
+  it('falls back to the MSI default when the msiexec command carries no trailing switches', () => {
+    const result = processor().extractSilentSwitches('msiexec /i "app.msi"', 'msi');
+    expect(result).toBe('/qn /norestart');
   });
 });
 
